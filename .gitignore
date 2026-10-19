@@ -18,8 +18,8 @@ dist/
 build/
 
 # Local databases and uploaded documents
-chatpdf-backend/app/data/
-chatpdf-backend/data/
+data/
+**/app/data/
 *.sqlite
 *.sqlite3
 *.db
