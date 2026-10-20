@@ -1,6 +1,15 @@
 # app/services/vectorstore.py
 
 import os
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY", "False")
+try:
+    import posthog
+    posthog.disabled = True
+    posthog.capture = lambda *args, **kwargs: None
+except Exception:
+    pass
+
 from chromadb import PersistentClient
 from chromadb.config import Settings
 from app.core.config import settings
@@ -11,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 class ChromaClient:
     def __init__(self, persist_directory=None):
-        # ✅ 禁用遥测
-        os.environ["ANONYMIZED_TELEMETRY"] = "False"
-        
         # 优先使用传入路径，否则从配置文件读取
         persist_directory = persist_directory or settings.CHROMA_DB_DIR
         persist_directory = "./app/data/chroma"
@@ -116,3 +122,40 @@ class ChromaClient:
     def count(self) -> int:
         """返回集合中的文档总数"""
         return self.collection.count()
+
+    def first_chunks(self, file_id: Optional[str] = None, limit: int = 5) -> List[Dict]:
+        """Return the earliest stored chunks for a document, in source order."""
+        try:
+            where = {"file_id": file_id} if file_id else None
+            results = self.collection.get(
+                where=where,
+                include=["metadatas", "documents"],
+            )
+            ids = results.get("ids", [])
+            metadatas = results.get("metadatas", [])
+            documents = results.get("documents", [])
+            chunks = []
+            for index, (chunk_id, metadata) in enumerate(zip(ids, metadatas)):
+                meta = metadata or {}
+                chunks.append({
+                    "id": chunk_id,
+                    "text": documents[index] if index < len(documents) else meta.get("text", ""),
+                    "meta": meta,
+                })
+            def source_order(chunk: Dict) -> tuple:
+                meta = chunk["meta"]
+                try:
+                    page = float(meta.get("page", 0) or 0)
+                except (TypeError, ValueError):
+                    page = 0.0
+                try:
+                    start = float(meta.get("start", 0) or 0)
+                except (TypeError, ValueError):
+                    start = 0.0
+                return page, start, str(chunk["id"])
+
+            chunks.sort(key=source_order)
+            return chunks[:limit]
+        except Exception as e:
+            logger.error("❌ 获取文档首批切片失败: %s", e, exc_info=True)
+            return []

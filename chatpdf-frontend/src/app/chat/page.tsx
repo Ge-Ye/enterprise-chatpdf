@@ -19,6 +19,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   sources?: SourceDoc[];  // ✅ 添加引用来源字段
+  status?: string;
 }
 
 interface FileItem {
@@ -39,6 +40,9 @@ export default function ChatPage() {
   const [currentFileId, setCurrentFileId] = useState<string | null>(initialFileId);
   const [availableFiles, setAvailableFiles] = useState<FileItem[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortControllerRef.current?.abort(), []);
 
   // 加载可用文件列表
   useEffect(() => {
@@ -74,9 +78,13 @@ export default function ChatPage() {
       content: input,
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    const assistantId = `${Date.now()}-assistant`;
+    const assistantMsg: Message = { id: assistantId, role: "assistant", content: "", sources: [] };
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput("");
     setIsLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       const payload = {
@@ -86,34 +94,90 @@ export default function ChatPage() {
 
       console.log("📤 发送请求:", payload);
 
-      const res = await fetch(`${API_BASE_URL}/chat`, {
+      const res = await fetch(`${API_BASE_URL}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       if (!res.ok) throw new Error(`请求失败：${res.status}`);
+      if (!res.body) throw new Error("响应不包含可读取的数据流");
 
-      const data = await res.json();
-      console.log("✅ 收到响应:", data);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let receivedChunk = false;
+      let streamDone = false;
 
-      const assistantMsg: Message = {
-        id: Date.now().toString(),
-        role: "assistant",
-        content: data.answer || "抱歉，未生成有效的回答。",
-        sources: data.source_docs || [],  // ✅ 保存引用来源
+      const handleEvent = (rawEvent: string) => {
+        let eventName = "message";
+        const dataLines: string[] = [];
+        for (const line of rawEvent.split(/\r?\n/)) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+        if (!dataLines.length) return;
+        const rawData = dataLines.join("\n");
+        let data: any = rawData;
+        try { data = JSON.parse(rawData); } catch { /* tolerate plain-text SSE data */ }
+
+        if (eventName === "status") {
+          setMessages((prev) => prev.map((message) => message.id === assistantId
+            ? { ...message, status: data?.message || "正在处理..." } : message));
+        } else if (eventName === "sources") {
+          setMessages((prev) => prev.map((message) => message.id === assistantId
+            ? { ...message, sources: Array.isArray(data?.source_docs) ? data.source_docs : [] } : message));
+        } else if (eventName === "chunk") {
+          const text = typeof data === "string" ? data : data?.text || "";
+          if (text) {
+            receivedChunk = true;
+            setMessages((prev) => prev.map((message) => message.id === assistantId
+              ? { ...message, content: message.content + text, status: undefined } : message));
+          }
+        } else if (eventName === "error") {
+          const message = typeof data === "string" ? data : data?.message || "流式生成失败。";
+          setMessages((prev) => prev.map((item) => item.id === assistantId
+            ? { ...item, content: item.content || `请求失败：${message}`, status: undefined } : item));
+          streamDone = true;
+        } else if (eventName === "done") {
+          setMessages((prev) => prev.map((message) => message.id === assistantId
+            ? { ...message, status: undefined } : message));
+          streamDone = true;
+        }
       };
 
-      setMessages((prev) => [...prev, assistantMsg]);
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const completeEvent = buffer.slice(0, boundary).replace(/\r$/, "");
+          buffer = buffer.slice(boundary + 2);
+          if (completeEvent.trim()) handleEvent(completeEvent);
+          boundary = buffer.indexOf("\n\n");
+        }
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) handleEvent(buffer);
+          break;
+        }
+        if (streamDone) {
+          await reader.cancel();
+          break;
+        }
+      }
+      if (!receivedChunk) {
+        setMessages((prev) => prev.map((message) => message.id === assistantId && !message.content
+          ? { ...message, content: "抱歉，未生成有效的回答。" } : message));
+      }
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error("消息发送失败：", err);
-      const errorMsg: Message = {
-        id: Date.now().toString(),
-        role: "assistant",
-        content: "请求失败，请检查后端服务是否正常运行。",
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      setMessages((prev) => prev.map((message) => message.id === assistantId
+        ? { ...message, content: message.content || "请求失败，请检查后端服务是否正常运行。" } : message));
     } finally {
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
       setIsLoading(false);
     }
   };
@@ -237,7 +301,11 @@ export default function ChatPage() {
                         m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-800"
                       }`}
                     >
-                      <div className="whitespace-pre-wrap">{m.content}</div>
+                      <div className="whitespace-pre-wrap min-h-6">
+                        {m.content || (m.role === "assistant" && isLoading
+                          ? <span className="text-gray-500">{m.status || "正在连接..."} <span className="animate-pulse">▍</span></span>
+                          : null)}
+                      </div>
                     </div>
 
                     {/* ✅ 显示引用来源 */}

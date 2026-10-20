@@ -1,5 +1,15 @@
 # app/main.py
-import sys, os
+import os
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY", "False")
+try:
+    import posthog
+    posthog.disabled = True
+    posthog.capture = lambda *args, **kwargs: None
+except Exception:
+    pass
+
+import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 #测试错误日志
@@ -48,4 +58,10 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host=settings.APP_HOST,
+        port=settings.APP_PORT,
+        reload=True,
+        reload_dirs=["app"],
+    )
