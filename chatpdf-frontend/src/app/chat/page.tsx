@@ -32,7 +32,7 @@ interface FileItem {
 
 
 
-export default function ChatPage() {
+function ChatPageContent() {
   const searchParams = useSearchParams();
   const initialFileId = searchParams.get("fileId");
 
@@ -418,5 +418,13 @@ export default function ChatPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <React.Suspense fallback={<main className="min-h-screen" />}>
+      <ChatPageContent />
+    </React.Suspense>
   );
 }

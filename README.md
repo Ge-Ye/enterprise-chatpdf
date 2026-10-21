@@ -72,6 +72,24 @@ graph TD
 
 ## 快速启动（Local Setup）
 
+### 方式一：Docker Compose 一键启动（推荐）
+
+在仓库根目录准备后端环境文件，并填入 `DEEPSEEK_API_KEY`、`COHERE_API_KEY` 等服务凭据：
+
+```powershell
+Copy-Item chatpdf-backend/.env.example chatpdf-backend/.env
+```
+
+可选地将根目录 `.env.example` 复制为 `.env`，设置浏览器可访问的 `NEXT_PUBLIC_API_BASE_URL`（默认 `http://localhost:8000`）。该值在前端镜像构建时写入客户端代码；部署到其他主机时应改成该主机可访问的 API 地址。
+
+启动前后端：
+
+```powershell
+docker compose up -d --build
+```
+
+打开 `http://localhost:3000`。Compose 会将 ChromaDB 和上传文件持久化到 `chatpdf-backend/app/data/chroma` 与 `chatpdf-backend/app/data/uploads`。查看服务日志可运行 `docker compose logs -f`；停止服务可运行 `docker compose down`（不会删除上述宿主机数据目录）。
+
 ### 1. 准备后端环境
 
 ```powershell

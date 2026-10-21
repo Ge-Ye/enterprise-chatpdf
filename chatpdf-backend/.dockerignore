@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.git/
+test_*.py
+app/data/chroma/*
+app/data/uploads/*
