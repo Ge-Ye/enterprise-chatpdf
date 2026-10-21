@@ -1,49 +1,49 @@
-# app/core/config.py
+from pathlib import Path
+from typing import List
 
-from pydantic_settings import BaseSettings
-from pydantic import Field
-import os
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
 
 class Settings(BaseSettings):
-    """
-    全局配置类，用于统一管理 ChatPDF 后端的所有配置。
-    自动支持从 .env 文件加载环境变量，也可通过系统环境变量覆盖。
-    """
+    """Central application settings loaded from backend/.env and process env."""
 
-    # === FastAPI Server ===
-    APP_HOST: str = Field("127.0.0.1", description="后端服务运行地址")
-    APP_PORT: int = Field(8000, description="后端服务端口号")
+    model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 
-    # === 文件存储 ===
-    UPLOAD_DIR: str = Field("./app/data/uploads", description="文件上传存储路径")
+    APP_HOST: str = "127.0.0.1"
+    APP_PORT: int = Field(default=8000, validation_alias=AliasChoices("BACKEND_PORT", "APP_PORT"))
+    UPLOAD_DIR: str = "./app/data/uploads"
+    CHROMA_DB_DIR: str = "./app/data/chroma"
+    ES_HOST: str = "http://localhost:9200"
+    ES_INDEX: str = "chatpdf_docs"
+    EMBEDDING_PROVIDER: str = "cohere"
+    RERANK_PROVIDER: str = "cohere"
+    COHERE_API_KEY: str = ""
+    COHERE_EMBEDDING_MODEL: str = "embed-multilingual-v3.0"
+    COHERE_RERANK_MODEL: str = "rerank-multilingual-v3.0"
+    DEEPSEEK_API_URL: str = "https://api.deepseek.com/v1"
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    DEBUG: bool = True
+    MIN_RELEVANCE_SCORE: float = 0.30
+    RERANK_TIMEOUT_SECONDS: float = 3.5
 
-    # === 向量数据库 (Chroma) ===
-    CHROMA_DB_DIR: str = Field("./app/data/chroma", description="Chroma 数据库存储路径")
-    CHROMA_PATH: str = Field("./chroma_db", description="兼容旧配置的路径别名")
+    @property
+    def allowed_origins(self) -> List[str]:
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
 
-    # === Elasticsearch ===
-    ES_HOST: str = Field("http://localhost:9200", description="Elasticsearch 服务地址")
-    ES_INDEX: str = Field("chatpdf_docs", description="Elasticsearch 索引名称")
+    @property
+    def upload_path(self) -> Path:
+        path = Path(self.UPLOAD_DIR)
+        return path if path.is_absolute() else BACKEND_DIR / path
 
-    # === Embedding 模型 ===
-    EMBEDDING_PROVIDER: str = Field("cohere", description="Embedding 模型提供方")
-    RERANK_PROVIDER: str = Field("cohere", description="Rerank 模型提供方")
-    COHERE_API_KEY: str = Field("", description="Cohere API Key")
-    COHERE_EMBEDDING_MODEL: str = Field("embed-multilingual-v3.0", description="Cohere Embedding 模型名称")
-    COHERE_RERANK_MODEL: str = Field("rerank-multilingual-v3.0", description="Cohere Rerank 模型名称")
+    @property
+    def chroma_path(self) -> Path:
+        path = Path(self.CHROMA_DB_DIR)
+        return path if path.is_absolute() else BACKEND_DIR / path
 
-    # === DeepSeek 大模型 ===
-    DEEPSEEK_API_URL: str = Field("", description="DeepSeek 接口地址")
-    DEEPSEEK_API_KEY: str = Field("", description="DeepSeek API Key")
-    DEEPSEEK_MODEL: str = Field("deepseek-chat", description="DeepSeek 模型名称")  # ✅ 新增这一行
 
-    # === 调试选项 ===
-    DEBUG: bool = Field(True, description="是否启用调试模式")
-
-    class Config:
-        env_file = ".env"           # ✅ 自动从 .env 文件读取
-        env_file_encoding = "utf-8"
-        case_sensitive = False      # ✅ 环境变量名不区分大小写
-
-# ✅ 全局单例配置对象
 settings = Settings()

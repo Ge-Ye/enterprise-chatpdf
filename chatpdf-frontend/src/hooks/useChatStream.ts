@@ -1,9 +1,10 @@
+import { API_BASE_URL } from "@/lib/api";
 // app/hooks/useChatStream.ts
 
 import { useState } from "react";
 import { Message } from "../context/ChatContext";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api";
+
 
 export function useChatStream(addMessage: (msg: Message) => void) {
   const [isLoading, setIsLoading] = useState(false);

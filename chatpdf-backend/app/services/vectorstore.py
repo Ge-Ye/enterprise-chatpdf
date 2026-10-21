@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 class ChromaClient:
     def __init__(self, persist_directory=None):
         # 优先使用传入路径，否则从配置文件读取
-        persist_directory = persist_directory or settings.CHROMA_DB_DIR
-        persist_directory = "./app/data/chroma"
+        persist_directory = persist_directory or str(settings.chroma_path)
         
         # ✅ 确保目录存在
         os.makedirs(persist_directory, exist_ok=True)

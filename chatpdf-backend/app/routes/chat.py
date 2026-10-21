@@ -21,8 +21,8 @@ router = APIRouter()
 chroma = ChromaClient()
 emb_client = EmbeddingClient()
 reranker = CohereReranker()
-MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.30"))
-RERANK_TIMEOUT_SECONDS = 3.5
+MIN_RELEVANCE_SCORE = settings.MIN_RELEVANCE_SCORE
+RERANK_TIMEOUT_SECONDS = settings.RERANK_TIMEOUT_SECONDS
 
 
 def is_summary_query(query: str) -> bool:

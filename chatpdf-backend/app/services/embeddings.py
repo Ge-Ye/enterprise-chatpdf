@@ -20,7 +20,7 @@ class EmbeddingClient:
             if not settings.COHERE_API_KEY:
                 raise ValueError("❌ COHERE_API_KEY 未配置")
             self._api_key = settings.COHERE_API_KEY
-            self.model = getattr(settings, 'COHERE_EMBED_MODEL', 'embed-multilingual-v3.0')
+            self.model = settings.COHERE_EMBEDDING_MODEL
             self._http_client = self._create_http_client()
             self.client = cohere.Client(
                 self._api_key,

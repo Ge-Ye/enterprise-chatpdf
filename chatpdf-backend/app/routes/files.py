@@ -1,14 +1,17 @@
-# app/routes/files.py
-import os, json
+import json
+from pathlib import Path
+
 from fastapi import APIRouter
 
+from app.core.config import settings
+
 router = APIRouter()
-UPLOAD_DIR = "app/data/uploads"
-META_FILE = os.path.join(UPLOAD_DIR, "files.json")
+META_FILE = settings.upload_path / "files.json"
+
 
 @router.get("/files")
 def get_files():
-    if not os.path.exists(META_FILE):
+    if not META_FILE.exists():
         return []
-    with open(META_FILE, "r", encoding="utf-8") as f:
+    with META_FILE.open("r", encoding="utf-8") as f:
         return json.load(f)

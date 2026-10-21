@@ -1,5 +1,7 @@
 "use client";
 
+import { API_BASE_URL } from "@/lib/api";
+
 import React, { useState } from "react";
 import { useChat } from "../context/ChatContext";
 
@@ -37,7 +39,7 @@ export default function UploadZone() {
     formData.append("file", file);
 
     const xhr = new XMLHttpRequest();
-    const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api";
+    const apiBase = API_BASE_URL;
     xhr.open("POST", `${apiBase}/upload`, true);
 
     xhr.upload.onprogress = (event) => {

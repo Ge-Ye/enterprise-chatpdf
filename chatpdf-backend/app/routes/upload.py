@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 es = Elasticsearch(settings.ES_HOST)
 
-UPLOAD_DIR = settings.UPLOAD_DIR
+UPLOAD_DIR = str(settings.upload_path)
 META_FILE = os.path.join(UPLOAD_DIR, "files.json")
 
 def persist_file(file: UploadFile, dest_path: str):

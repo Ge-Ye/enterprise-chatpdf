@@ -47,7 +47,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 本地开发可放开，生产请限制前端域名
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,6 +62,6 @@ if __name__ == "__main__":
         "app.main:app",
         host=settings.APP_HOST,
         port=settings.APP_PORT,
-        reload=True,
-        reload_dirs=["app"],
+        reload=settings.DEBUG,
+        reload_dirs=["app"] if settings.DEBUG else None,
     )

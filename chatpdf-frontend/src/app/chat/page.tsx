@@ -1,5 +1,7 @@
 "use client";
 
+import { API_BASE_URL } from "@/lib/api";
+
 import React, { useState, useRef, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -28,7 +30,7 @@ interface FileItem {
   alias?: string;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api";
+
 
 export default function ChatPage() {
   const searchParams = useSearchParams();
@@ -119,24 +121,28 @@ export default function ChatPage() {
         }
         if (!dataLines.length) return;
         const rawData = dataLines.join("\n");
-        let data: any = rawData;
-        try { data = JSON.parse(rawData); } catch { /* tolerate plain-text SSE data */ }
+        let data: Record<string, unknown> = {};
+        try {
+          const parsed: unknown = JSON.parse(rawData);
+          if (typeof parsed === "object" && parsed !== null) data = parsed as Record<string, unknown>;
+          else data = { text: String(parsed) };
+        } catch { data = { text: rawData }; }
 
         if (eventName === "status") {
           setMessages((prev) => prev.map((message) => message.id === assistantId
-            ? { ...message, status: data?.message || "正在处理..." } : message));
+            ? { ...message, status: (typeof data.message === "string" ? data.message : "正在处理...") } : message));
         } else if (eventName === "sources") {
           setMessages((prev) => prev.map((message) => message.id === assistantId
-            ? { ...message, sources: Array.isArray(data?.source_docs) ? data.source_docs : [] } : message));
+            ? { ...message, sources: Array.isArray(data.source_docs) ? data.source_docs as SourceDoc[] : [] } : message));
         } else if (eventName === "chunk") {
-          const text = typeof data === "string" ? data : data?.text || "";
+          const text = typeof data.text === "string" ? data.text : "";
           if (text) {
             receivedChunk = true;
             setMessages((prev) => prev.map((message) => message.id === assistantId
               ? { ...message, content: message.content + text, status: undefined } : message));
           }
         } else if (eventName === "error") {
-          const message = typeof data === "string" ? data : data?.message || "流式生成失败。";
+          const message = typeof data.message === "string" ? data.message : "流式生成失败。";
           setMessages((prev) => prev.map((item) => item.id === assistantId
             ? { ...item, content: item.content || `请求失败：${message}`, status: undefined } : item));
           streamDone = true;
