@@ -13,7 +13,6 @@ RUN apt-get update \
 
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir pydantic-settings==2.11.0
 
 COPY --chown=app:app app ./app
 RUN mkdir -p /app/app/data/chroma /app/app/data/uploads \

@@ -32,7 +32,9 @@ class ChromaClient:
         )
 
         # 创建（或获取）全局集合
-        self.collection = self.client.get_or_create_collection(name="chatpdf_collection")
+        self.collection = self.client.get_or_create_collection(
+            name="chatpdf_collection_bge_m3", metadata={"hnsw:space": "cosine"}
+        )
         logger.info(f"✅ ChromaDB 初始化成功，文档数量: {self.collection.count()}")
 
     def add_documents(self, docs: List[Dict]):
@@ -66,7 +68,7 @@ class ChromaClient:
             where: 过滤条件，例如 {"file_id": "xxx"}
             
         Returns:
-            [{"id": "xxx", "score": 0.95, "meta": {...}}, ...]
+            [{"id": "xxx", "score": 0.73, "meta": {...}}, ...]
         """
         try:
             # ✅ 构建查询参数
@@ -93,7 +95,8 @@ class ChromaClient:
                 for i, (_id, dist, meta) in enumerate(zip(ids, distances, metas)):
                     hit = {
                         "id": _id, 
-                        "score": 1 - dist,  # ✅ 转换为相似度分数
+                        "score": max(0.0, min(1.0, 1.0 - dist)),
+                        "distance": dist,
                         "meta": meta
                     }
                     # ✅ 确保 text 字段存在
@@ -158,3 +161,61 @@ class ChromaClient:
         except Exception as e:
             logger.error("❌ 获取文档首批切片失败: %s", e, exc_info=True)
             return []
+
+    def all_chunks(self, file_id: Optional[str] = None) -> List[Dict]:
+        """Load chunk texts and metadata for local lexical retrieval."""
+        try:
+            where = {"file_id": file_id} if file_id else None
+            results = self.collection.get(where=where, include=["metadatas", "documents"])
+            ids = results.get("ids", [])
+            metadatas = results.get("metadatas", []) or []
+            documents = results.get("documents", []) or []
+            return [
+                {
+                    "id": chunk_id,
+                    "text": documents[i] if i < len(documents) else (metadatas[i] or {}).get("text", ""),
+                    "meta": metadatas[i] or {},
+                }
+                for i, chunk_id in enumerate(ids)
+            ]
+        except Exception as exc:
+            logger.error("获取 BM25 检索语料失败: %s", exc, exc_info=True)
+            return []
+
+    def get_neighbor_chunk(self, doc_or_file_id: str, target_chunk_index: int) -> Optional[Dict]:
+        """Fetch an adjacent chunk using the persisted document id and integer index."""
+        for id_field in ("file_id", "doc_id"):
+            try:
+                results = self.collection.get(
+                    where={"$and": [
+                        {id_field: str(doc_or_file_id)},
+                        {"chunk_index": int(target_chunk_index)},
+                    ]},
+                    include=["metadatas", "documents"],
+                )
+                ids = results.get("ids", [])
+                if not ids:
+                    continue
+                metadatas = results.get("metadatas", []) or []
+                documents = results.get("documents", []) or []
+                meta = (metadatas[0] or {}) if metadatas else {}
+                if int(meta.get("chunk_index", -1)) != int(target_chunk_index):
+                    continue
+                return {
+                    "id": ids[0],
+                    "text": documents[0] if documents else meta.get("text", ""),
+                    "meta": meta,
+                }
+            except (TypeError, ValueError, KeyError) as exc:
+                logger.debug("Chroma neighbor lookup via %s failed: %s", id_field, exc)
+            except Exception as exc:
+                logger.debug("Chroma neighbor lookup via %s failed: %s", id_field, exc)
+        logger.debug(
+            "No adjacent chunk found for doc_id=%s chunk_index=%s",
+            doc_or_file_id, target_chunk_index,
+        )
+        return None
+
+    def get_chunk_by_index(self, file_id: str, chunk_index: int) -> Optional[Dict]:
+        """Backward-compatible alias for neighbor lookups."""
+        return self.get_neighbor_chunk(file_id, chunk_index)

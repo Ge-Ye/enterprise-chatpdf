@@ -23,7 +23,7 @@ def es_search_text(
         filter_query: 过滤条件，例如 {"term": {"file_id": "xxx"}}
         
     Returns:
-        [{"id": "xxx", "source": {...}, "score": 0.95}, ...]
+        [{"id": "xxx", "source": {...}, "score": 0.73}, ...]
     """
     try:
         es = Elasticsearch([settings.ES_HOST])
@@ -72,7 +72,7 @@ def rrf_fusion(ranked_lists: List[List[str]], k: int = 60) -> Dict[str, float]:
         k: RRF 常数
         
     Returns:
-        {"id1": 0.95, "id2": 0.85, ...}
+        {"id1": 0.03, "id2": 0.02, ...}
     """
     scores = {}
     

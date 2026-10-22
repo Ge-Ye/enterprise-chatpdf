@@ -4,8 +4,9 @@ from app.models import ChatRequest, ChatResponse, SourceDoc
 from app.services.embeddings import EmbeddingClient
 from app.services.vectorstore import ChromaClient
 from app.services.es_retriever import es_search_text, rrf_fusion
+from app.services.bm25_retriever import bm25_search
 from app.core.config import settings
-from app.services.reranker import CohereReranker
+from app.services.reranker import SiliconFlowReranker
 from app.services.generator import stream_from_deepseek
 from app.utils.streaming import sse_response
 from typing import List, Dict, Optional
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 chroma = ChromaClient()
 emb_client = EmbeddingClient()
-reranker = CohereReranker()
+reranker = SiliconFlowReranker()
 MIN_RELEVANCE_SCORE = settings.MIN_RELEVANCE_SCORE
 RERANK_TIMEOUT_SECONDS = settings.RERANK_TIMEOUT_SECONDS
 
@@ -119,17 +120,13 @@ def _with_overview_scores(
     docs: List[Dict], overview_ids: Optional[set] = None
 ) -> List[Dict]:
     """Use reranker scores when available; otherwise mark ordered overview chunks."""
-    baseline_scores = (0.98, 0.95, 0.92, 0.90, 0.88)
     scored = []
     for index, doc in enumerate(docs):
         item = dict(doc)
         score = item.get("rerank_score")
         is_overview_chunk = overview_ids is None or item.get("id") in overview_ids
-        if is_overview_chunk and (score is None or float(score or 0) <= 0):
-            item["rerank_score"] = (
-                0.50 if _is_author_header_chunk(item)
-                else baseline_scores[min(index, len(baseline_scores) - 1)]
-            )
+        if is_overview_chunk and score is None and item.get("score") is not None:
+            item["rerank_score"] = item["score"]
         scored.append(item)
     return scored
 
@@ -215,16 +212,82 @@ def build_prompt(query: str, docs: List[Dict]) -> str:
 1. 直接回答问题，不要在回答中添加"Source ID"或引用标记
 2. 用清晰、专业的语言组织答案
 3. 遵守上述无匹配时的闲聊与文档问答分流规则
+{"4. 请用简明扼要的 3~5 个核心要点总结文档主旨与关键规定，总字数控制在 250~350 字以内，条理清晰，不要长篇大论。" if _is_pure_summary_query(query) else ""}
 
 回答："""
     return prompt
+
+
+def _join_neighbor_text(left: str, right: str) -> str:
+    """Join adjacent chunks while removing an exact character overlap when present."""
+    left = str(left or "").rstrip()
+    right = str(right or "").lstrip()
+    limit = min(len(left), len(right), 500)
+    for overlap in range(limit, 0, -1):
+        if left.endswith(right[:overlap]):
+            return left + right[overlap:]
+    return f"{left}\n\n{right}" if left and right else left or right
+
+
+def expand_neighbor_chunks(docs: List[Dict], file_id: str = "", query: str = "") -> List[Dict]:
+    """Expand the two leading retrieval hits with their next stored chunk for LLM context only."""
+    if not docs or not file_id or _is_pure_summary_query(query):
+        return list(docs)
+    indexed = {}
+    for doc in docs:
+        meta = doc.get("meta") or {}
+        try:
+            indexed[int(meta["chunk_index"])] = doc
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    expanded: List[Dict] = []
+    consumed = set()
+    expanded_cores = 0
+    for doc in docs:
+        doc_id = doc.get("id")
+        if doc_id in consumed:
+            continue
+        item = dict(doc)
+        meta = item.get("meta") or {}
+        try:
+            chunk_index = int(meta["chunk_index"])
+        except (KeyError, TypeError, ValueError):
+            expanded.append(item)
+            continue
+
+        if expanded_cores < 3:
+            expanded_cores += 1
+            neighbor = indexed.get(chunk_index + 1)
+            if neighbor is None:
+                neighbor = chroma.get_neighbor_chunk(file_id, chunk_index + 1)
+            if neighbor and neighbor.get("id") not in consumed and neighbor.get("id") != doc_id:
+                item["text"] = _join_neighbor_text(item.get("text", ""), neighbor.get("text", ""))
+                consumed.add(neighbor.get("id"))
+        consumed.add(doc_id)
+        expanded.append(item)
+    return expanded
+
+
+def _sync_source_text(sources, context_docs: List[Dict]) -> None:
+    """Reflect expanded hit text in existing source cards without adding neighbor-only cards."""
+    text_by_id = {doc.get("id"): str(doc.get("text", "") or "") for doc in context_docs}
+    for source in sources or []:
+        source_id = source.get("doc_id") if isinstance(source, dict) else getattr(source, "doc_id", None)
+        if source_id not in text_by_id:
+            continue
+        if isinstance(source, dict):
+            source["text"] = text_by_id[source_id]
+        else:
+            source.text = text_by_id[source_id]
 
 
 def filter_relevant_docs(reranked: List[Dict]) -> List[Dict]:
     """Keep only documents meeting the configured reranker score threshold."""
     return [
         doc for doc in reranked
-        if float(doc.get("rerank_score", 0) or 0) >= MIN_RELEVANCE_SCORE
+        if float(doc.get("rerank_score", doc.get("score", 0)) or 0) > 0.01
+        and float(doc.get("rerank_score", doc.get("score", 0)) or 0) >= MIN_RELEVANCE_SCORE
     ]
 
 
@@ -243,7 +306,10 @@ def format_source_docs(
     """
     source_docs = []
     
-    docs = filter_relevant_docs(reranked) if apply_threshold else reranked
+    docs = [
+        doc for doc in (filter_relevant_docs(reranked) if apply_threshold else reranked)
+        if float(doc.get("rerank_score", doc.get("score", 0)) or 0) > 0.01
+    ]
     for i, doc in enumerate(docs[:top_n]):
         # 提取相关度分数
         raw_score = doc.get("rerank_score")
@@ -251,7 +317,6 @@ def format_source_docs(
             raw_score = doc.get("score")
         relevance_score = float(raw_score or 0.0)
         
-        # 提取文本内容（截取前200字符作为摘要）
         text = str(doc.get('text', '') or '')
         abstract_match = re.search(r"\babstract\b|摘要", text, flags=re.IGNORECASE)
         if abstract_match and (
@@ -294,7 +359,8 @@ def _vector_search(req: ChatRequest, query_emb: List[float]) -> List[Dict]:
 def _es_search(req: ChatRequest, query: Optional[str] = None) -> List[Dict]:
     started = time.perf_counter()
     search_query = query if query is not None else req.query
-    if not req.use_es:
+    es_enabled = bool(getattr(settings, "ENABLE_ES", False) or settings.USE_ES)
+    if not req.use_es or not es_enabled:
         hits = []
     elif req.file_id:
         hits = es_search_text(
@@ -303,31 +369,50 @@ def _es_search(req: ChatRequest, query: Optional[str] = None) -> List[Dict]:
         )
     else:
         hits = es_search_text(settings.ES_INDEX, search_query, top_k=req.top_k)
-    print(f"ES 检索耗时: {time.perf_counter() - started:.3f}s", flush=True)
+    if es_enabled and req.use_es:
+        print(f"ES 检索耗时: {time.perf_counter() - started:.3f}s", flush=True)
     return hits
 
 
-def _merge_candidates(vector_hits: List[Dict], es_hits: List[Dict], top_k: int) -> List[Dict]:
-    ranked_lists = []
-    if vector_hits:
-        ranked_lists.append([hit["id"] for hit in vector_hits])
-    if es_hits:
-        ranked_lists.append([hit["id"] for hit in es_hits])
-    fused_scores = rrf_fusion(ranked_lists) if ranked_lists else {}
+def _keyword_search(req: ChatRequest, query: Optional[str] = None) -> List[Dict]:
+    search_query = query if query is not None else req.query
+    es_enabled = bool(getattr(settings, "ENABLE_ES", False) or settings.USE_ES)
+    if es_enabled:
+        es_hits = _es_search(req, search_query)
+        max_score = max((float(hit.get("score", 0) or 0) for hit in es_hits), default=0.0)
+        return [
+            {
+                "id": hit["id"],
+                "text": hit.get("source", {}).get("text", ""),
+                "meta": hit.get("source", {}).get("meta", {}),
+                "score": float(hit.get("score", 0) or 0) / max_score if max_score else 0.0,
+                "bm25_score": float(hit.get("score", 0) or 0) / max_score if max_score else 0.0,
+            }
+            for hit in es_hits
+        ]
+    started = time.perf_counter()
+    documents = chroma.all_chunks(req.file_id or None)
+    hits = bm25_search(search_query, documents, req.top_k)
+    print(f"关键字检索(BM25)耗时: {time.perf_counter() - started:.3f}s", flush=True)
+    return hits
 
+
+def _merge_candidates(vector_hits: List[Dict], keyword_hits: List[Dict], top_k: int) -> List[Dict]:
     candidates = {}
     for hit in vector_hits:
         candidates[hit["id"]] = {
             "id": hit["id"], "text": hit["meta"].get("text", ""),
-            "meta": hit["meta"], "score": fused_scores.get(hit["id"], 0),
+            "meta": hit["meta"], "score": hit.get("score", 0),
+            "vector_score": hit.get("score", 0),
         }
-    for hit in es_hits:
-        candidates[hit["id"]] = {
-            "id": hit["id"], "text": hit["source"].get("text", ""),
-            "meta": hit["source"].get("meta", {}),
-            "score": fused_scores.get(hit["id"], 0),
-        }
-    return sorted(candidates.values(), key=lambda item: item["score"], reverse=True)[:top_k]
+    for hit in keyword_hits:
+        item = candidates.setdefault(hit["id"], {
+            "id": hit["id"], "text": hit.get("text", ""), "meta": hit.get("meta", {}),
+            "score": 0.0, "vector_score": 0.0,
+        })
+        item["bm25_score"] = hit.get("bm25_score", hit.get("score", 0.0))
+        item["score"] = max(float(item.get("score", 0) or 0), float(item["bm25_score"] or 0))
+    return sorted(candidates.values(), key=lambda item: item["score"], reverse=True)[:max(top_k * 2, top_k)]
 
 
 def _finalize_ranking(query: str, candidates: List[Dict], top_k: int):
@@ -336,7 +421,7 @@ def _finalize_ranking(query: str, candidates: List[Dict], top_k: int):
         reranked = reranker.rerank(query, candidates, top_n=top_k) if candidates else []
         rerank_succeeded = True
     except Exception as exc:
-        logger.warning("Cohere rerank 失败，回退到 RRF 排序: %s", exc)
+        logger.warning("SiliconFlow rerank 失败，回退到向量相似度排序: %s", exc)
         reranked = candidates[:top_k]
         rerank_succeeded = False
     print(f"Rerank 耗时: {time.perf_counter() - rerank_started:.3f}s", flush=True)
@@ -351,12 +436,9 @@ def retrieve_and_rank(req: ChatRequest):
         return [], []
     if _is_pure_summary_query(req.query):
         first_chunks = chroma.first_chunks(req.file_id or None, limit=8)
-        es_hits = _es_search(req)
-        candidates = _merge_candidates([], es_hits, req.top_k)
-        selected = _merge_overview_and_candidates(
-            first_chunks, candidates, limit=8, query=req.query
-        )
-        return selected, format_source_docs(selected, top_n=2, apply_threshold=False)
+        return _merge_overview_and_candidates(
+            first_chunks, [], limit=8, query=req.query
+        ), []
 
     search_query = _evaluation_search_query(req.query)
     embedding_started = time.perf_counter()
@@ -367,8 +449,8 @@ def retrieve_and_rank(req: ChatRequest):
     except Exception as exc:
         logger.warning("Embedding/向量检索失败，降级为 ES 与文档首部召回: %s", exc)
         vector_hits = []
-    es_hits = _es_search(req, search_query) if search_query != req.query else _es_search(req)
-    candidates = _merge_candidates(vector_hits, es_hits, req.top_k)
+    keyword_hits = _keyword_search(req, search_query)
+    candidates = _merge_candidates(vector_hits, keyword_hits, req.top_k)
     selected, sources, reranked = _finalize_ranking(req.query, candidates, req.top_k)
     if is_summary_query(req.query):
         first_chunks = chroma.first_chunks(req.file_id or None, limit=8)
@@ -397,20 +479,18 @@ async def retrieve_and_rank_async(req: ChatRequest):
         first_chunks_task = asyncio.create_task(asyncio.to_thread(
             chroma.first_chunks, req.file_id or None, 8
         ))
-        es_hits = await asyncio.to_thread(_es_search, req)
         first_chunks = await first_chunks_task
-        candidates = _merge_candidates([], es_hits, req.top_k)
         selected = _merge_overview_and_candidates(
-            first_chunks, candidates, limit=8, query=req.query
+            first_chunks, [], limit=8, query=req.query
         )
-        return selected, format_source_docs(selected, top_n=2, apply_threshold=False)
+        return selected, []
 
     search_query = _evaluation_search_query(req.query)
     embedding_started = time.perf_counter()
     if search_query == req.query:
-        es_search_task = asyncio.create_task(asyncio.to_thread(_es_search, req))
+        keyword_search_task = asyncio.create_task(asyncio.to_thread(_keyword_search, req))
     else:
-        es_search_task = asyncio.create_task(asyncio.to_thread(_es_search, req, search_query))
+        keyword_search_task = asyncio.create_task(asyncio.to_thread(_keyword_search, req, search_query))
     try:
         query_embs = await asyncio.to_thread(emb_client.embed_texts, [search_query])
         query_emb = query_embs[0]
@@ -419,8 +499,8 @@ async def retrieve_and_rank_async(req: ChatRequest):
     except Exception as exc:
         logger.warning("Embedding/向量检索失败，降级为 ES 与文档首部召回: %s", exc)
         vector_hits = []
-    es_hits = await es_search_task
-    candidates = _merge_candidates(vector_hits, es_hits, req.top_k)
+    keyword_hits = await keyword_search_task
+    candidates = _merge_candidates(vector_hits, keyword_hits, req.top_k)
 
     rerank_started = time.perf_counter()
     rerank_succeeded = False
@@ -431,10 +511,10 @@ async def retrieve_and_rank_async(req: ChatRequest):
         ) if candidates else []
         rerank_succeeded = True
     except asyncio.TimeoutError:
-        logger.warning("Cohere rerank 超过 %.1f 秒，回退到 RRF 排序", RERANK_TIMEOUT_SECONDS)
+        logger.warning("SiliconFlow rerank 超过 %.1f 秒，回退到向量相似度排序", RERANK_TIMEOUT_SECONDS)
         reranked = candidates[:req.top_k]
     except Exception as exc:
-        logger.warning("Cohere rerank 失败，回退到 RRF 排序: %s", exc)
+        logger.warning("SiliconFlow rerank 失败，回退到向量相似度排序: %s", exc)
         reranked = candidates[:req.top_k]
     print(f"Rerank 耗时: {time.perf_counter() - rerank_started:.3f}s", flush=True)
 
@@ -467,7 +547,9 @@ async def chat_sync(req: ChatRequest):
         reranked, formatted_sources = retrieve_and_rank(req)
         
         # ✅ 6. 构建 Prompt（只使用前2个文档）
-        prompt = build_prompt(req.query, reranked[:5])
+        prompt_docs = expand_neighbor_chunks(reranked[:5], req.file_id, req.query)
+        _sync_source_text(formatted_sources, prompt_docs)
+        prompt = build_prompt(req.query, prompt_docs)
         
         # ✅ 7. 调用 LLM 生成答案
         answer_parts = []
@@ -495,7 +577,9 @@ async def chat_stream_post(req: ChatRequest):
         yield {"event": "status", "data": {"message": "正在检索相关文档..."}}
         try:
             relevant_docs, formatted_sources = await retrieve_and_rank_async(req)
-            prompt = build_prompt(req.query, relevant_docs[:5])
+            prompt_docs = expand_neighbor_chunks(relevant_docs[:5], req.file_id, req.query)
+            _sync_source_text(formatted_sources, prompt_docs)
+            prompt = build_prompt(req.query, prompt_docs)
             yield {"event": "status", "data": {"message": "正在思考并生成回答..."}}
 
             deepseek_started = time.perf_counter()
@@ -537,7 +621,9 @@ async def chat_stream(
         logger.info(f"📥 收到流式请求: query={query}, file_id={file_id}")
         req = ChatRequest(file_id=file_id or "", query=query, top_k=top_k)
         relevant_docs, formatted_sources = await retrieve_and_rank_async(req)
-        prompt = build_prompt(query, relevant_docs[:5])
+        prompt_docs = expand_neighbor_chunks(relevant_docs[:5], req.file_id, req.query)
+        _sync_source_text(formatted_sources, prompt_docs)
+        prompt = build_prompt(query, prompt_docs)
         generator = stream_from_deepseek(prompt)
         return await sse_response(generator, formatted_sources)
         

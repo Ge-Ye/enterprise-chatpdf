@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -18,11 +18,14 @@ class Settings(BaseSettings):
     CHROMA_DB_DIR: str = "./app/data/chroma"
     ES_HOST: str = "http://localhost:9200"
     ES_INDEX: str = "chatpdf_docs"
-    EMBEDDING_PROVIDER: str = "cohere"
-    RERANK_PROVIDER: str = "cohere"
-    COHERE_API_KEY: str = ""
-    COHERE_EMBEDDING_MODEL: str = "embed-multilingual-v3.0"
-    COHERE_RERANK_MODEL: str = "rerank-multilingual-v3.0"
+    USE_ES: bool = False
+    ENABLE_ES: bool = False
+    EMBEDDING_PROVIDER: str = "siliconflow"
+    RERANK_PROVIDER: str = "siliconflow"
+    SILICONFLOW_API_KEY: str = ""
+    SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+    EMBEDDING_MODEL: str = "BAAI/bge-m3"
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
     DEEPSEEK_API_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_MODEL: str = "deepseek-chat"
@@ -30,6 +33,11 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     MIN_RELEVANCE_SCORE: float = 0.30
     RERANK_TIMEOUT_SECONDS: float = 3.5
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def strip_string_settings(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
     @property
     def allowed_origins(self) -> List[str]:

@@ -1,6 +1,5 @@
 # app/services/embeddings.py
 
-import cohere
 import httpcore
 import httpx
 import time
@@ -14,22 +13,12 @@ class EmbeddingClient:
     """统一的 Embedding 服务客户端"""
     
     def __init__(self):
-        self.provider = settings.EMBEDDING_PROVIDER
-        
-        if self.provider == "cohere":
-            if not settings.COHERE_API_KEY:
-                raise ValueError("❌ COHERE_API_KEY 未配置")
-            self._api_key = settings.COHERE_API_KEY
-            self.model = settings.COHERE_EMBEDDING_MODEL
-            self._http_client = self._create_http_client()
-            self.client = cohere.Client(
-                self._api_key,
-                timeout=self._http_client.timeout,
-                httpx_client=self._http_client,
-            )
-            logger.info(f"✅ Cohere Embedding 初始化成功，模型: {self.model}")
-        else:
-            raise NotImplementedError(f"不支持的 Embedding 提供商: {self.provider}")
+        self.provider = "siliconflow"
+        self._api_key = settings.SILICONFLOW_API_KEY.strip()
+        self.base_url = settings.SILICONFLOW_BASE_URL.strip().rstrip("/")
+        self.model = settings.EMBEDDING_MODEL.strip()
+        self._http_client = self._create_http_client()
+        logger.info("SiliconFlow Embedding 初始化成功，模型: %s", self.model)
     
     @staticmethod
     def _create_http_client() -> httpx.Client:
@@ -39,7 +28,7 @@ class EmbeddingClient:
                 max_connections=10,
                 keepalive_expiry=60.0,
             ),
-            timeout=httpx.Timeout(connect=6.0, read=6.0, write=6.0, pool=5.0),
+            timeout=httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=15.0),
         )
 
     @staticmethod
@@ -70,26 +59,23 @@ class EmbeddingClient:
         if not texts:
             return []
 
-        for attempt in range(2):
+        for attempt in range(3):
             try:
-                if self.provider == "cohere":
-                    request_options = {"max_retries": 0}
-                    if len(texts) > 1:
-                        request_options["timeout_in_seconds"] = 15.0
-                    response = self.client.embed(
-                        texts=texts,
-                        model=self.model,
-                        input_type=input_type,
-                        request_options=request_options,
-                    )
-                    return response.embeddings
-                raise NotImplementedError(f"未实现的提供商: {self.provider}")
+                if not self._api_key:
+                    raise ValueError("SILICONFLOW_API_KEY 未配置")
+                response = self._http_client.post(
+                    f"{self.base_url}/embeddings",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json={"model": self.model, "input": texts},
+                )
+                response.raise_for_status()
+                return [item["embedding"] for item in response.json()["data"]]
             except Exception as exc:
-                if not self._is_transient_connection_error(exc) or attempt >= 1:
+                if not self._is_transient_connection_error(exc) or attempt >= 2:
                     logger.error("❌ Embedding 生成失败: %s", exc)
                     raise
                 logger.warning(
-                    "Embedding 连接异常，第 %d/1 次重试: %s",
+                    "Embedding 连接异常，第 %d/2 次重试: %s",
                     attempt + 1,
                     exc,
                 )

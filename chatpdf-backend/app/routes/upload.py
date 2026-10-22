@@ -5,16 +5,14 @@ import json
 import logging
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks, HTTPException
 from app.core.config import settings
-from app.services.pdf_parser import extract_text_by_page
+from app.services.pdf_parser import extract_document_text
 from app.services.chunker import chunk_text
 from app.services.embeddings import EmbeddingClient
 from app.services.vectorstore import ChromaClient
 from app.models import UploadResponse
-from elasticsearch import Elasticsearch
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-es = Elasticsearch(settings.ES_HOST)
 
 UPLOAD_DIR = str(settings.upload_path)
 META_FILE = os.path.join(UPLOAD_DIR, "files.json")
@@ -34,6 +32,8 @@ def save_files(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def index_to_elasticsearch(docs: list, index: str):
+    from elasticsearch import Elasticsearch
+    es = Elasticsearch(settings.ES_HOST.strip())
     for d in docs:
         doc_body = {
             "text": d["text"],
@@ -48,13 +48,16 @@ def preprocess_and_index(file_id: str, filepath: str):
     """后台任务：解析、分块、向量化、索引"""
     try:
         logger.info(f"📄 开始处理文件: {file_id}")
-        pages = extract_text_by_page(filepath)
-        all_chunks = []
-        for pidx, page_text in enumerate(pages):
-            chunks = chunk_text(page_text, chunk_size=1200, overlap=200)
-            for c in chunks:
-                c["meta"].update({"page": pidx, "file_id": file_id})
-            all_chunks.extend(chunks)
+        document_text, page_ranges = extract_document_text(filepath)
+        all_chunks = chunk_text(
+            document_text,
+            chunk_size=900,
+            overlap=180,
+            page_ranges=page_ranges,
+            doc_id=file_id,
+        )
+        for chunk in all_chunks:
+            chunk["meta"].update({"file_id": file_id, "doc_id": file_id})
 
         emb_client = EmbeddingClient()
         texts = [c["text"] for c in all_chunks]
@@ -64,7 +67,8 @@ def preprocess_and_index(file_id: str, filepath: str):
 
         chroma = ChromaClient()
         chroma.add_documents(all_chunks)
-        index_to_elasticsearch(all_chunks, settings.ES_INDEX)
+        if settings.USE_ES or getattr(settings, "ENABLE_ES", False):
+            index_to_elasticsearch(all_chunks, settings.ES_INDEX.strip())
 
         # ✅ 保存状态
         status_path = os.path.join(UPLOAD_DIR, f"{file_id}.status.json")
