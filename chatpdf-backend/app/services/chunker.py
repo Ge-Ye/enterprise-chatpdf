@@ -4,15 +4,21 @@ import uuid
 import re
 
 _LIST_START = re.compile(r"^\s*(?:[-*•●▪◦·]|\d+[.)、])\s+")
-_REAL_HEADER = re.compile(r"^\s*##\s+(.+?)\s*$")
+_REAL_HEADER = re.compile(r"^\s*#{2,3}\s+(.+?)\s*$")
 _TERMINAL = re.compile(r"[.!?。！？]\s*$")
 _SPLIT_SEPARATORS = ("\n\n", "\n- ", "\n", "。", ". ", "；", "; ", "，", ", ", " ")
+_INLINE_POLICY_SUBHEADING = re.compile(r"(?:^|\s)-\s*(Accurate information|Acting fairly|Ratings, feedback, and reviews)\s+-\s+", re.I)
 
 
 def clean_pdf_text(text: str) -> str:
     """Join extraction-induced line wraps while retaining headings, paragraphs and lists."""
+    text = re.sub(r"(?im)^\s*https?://\S+\s+\d+\s*/\s*\d+\s*$", "", text)
+    text = re.sub(r"(?m)^\s*\d+\s*/\s*\d+\s*$", "", text)
+    text = re.sub(r"([a-zA-Z]+)-\s*\n\s*([a-z]+)", r"\1\2", text)
+    text = re.sub(r"\s+-\s+(?=[a-z])", " ", text)
     text = re.sub(r"(?<=[A-Za-z])-\s*\n\s*(?=[A-Za-z])", "", text)
     text = re.sub(r"[\ue000-\uf8ff]", " ", text)
+    text = _INLINE_POLICY_SUBHEADING.sub(lambda m: "\n### " + m.group(1) + "\n", text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     output: List[str] = []
     for raw in lines:
@@ -30,8 +36,8 @@ def clean_pdf_text(text: str) -> str:
             output.append("  " + line)
             continue
         if (
-            line.startswith("## ")
-            or previous.startswith("## ")
+            line.startswith(("## ", "### "))
+            or previous.startswith(("## ", "### "))
             or _TERMINAL.search(previous)
             or _LIST_START.match(line)
             or _LIST_START.match(previous)

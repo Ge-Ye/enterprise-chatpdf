@@ -14,12 +14,19 @@ _BULLET = re.compile(r"^\s*(?:[•●▪◦·\uf0b7*\-–])\s*(.*)$")
 _NUMBERED = re.compile(r"^\s*\d+[.)、]\s+")
 _NAV_NOISE = ("Seller Central Help", "Policies, agreements, and guidelines")
 _TERMINAL = re.compile(r"[.!?。！？,，;；:]\s*$")
+_PRINT_URL_FOOTER = re.compile(r"(?im)^\s*https?://\S+\s+\d+\s*/\s*\d+\s*$")
+_PAGE_FOOTER = re.compile(r"(?m)^\s*\d+\s*/\s*\d+\s*$")
+_SOFT_HYPHEN_WRAP = re.compile(r"([a-zA-Z]+)-\s*\n\s*([a-z]+)")
+_LOWERCASE_FALSE_HYPHEN = re.compile(r"\s+-\s+(?=[a-z])")
 
 
 def clean_page_text(text: str) -> str:
     """Remove common browser-print margins and repair PDF extraction noise."""
     text = text or ""
-    text = re.sub(r"(?<=[A-Za-z])-\s*\n\s*(?=[A-Za-z])", "", text)
+    text = _PRINT_URL_FOOTER.sub("", text)
+    text = _PAGE_FOOTER.sub("", text)
+    text = _SOFT_HYPHEN_WRAP.sub(r"\1\2", text)
+    text = _LOWERCASE_FALSE_HYPHEN.sub(" ", text)
     lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
 
     def is_margin(line: str) -> bool:

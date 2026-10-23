@@ -5,7 +5,7 @@ import { API_BASE_URL } from "@/lib/api";
 import React, { useState, useRef, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Upload, FileText, Send, BookOpen } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Send, BookOpen, ChevronDown } from "lucide-react";
 
 // ✅ 添加引用来源的数据结构
 interface SourceDoc {
@@ -14,6 +14,12 @@ interface SourceDoc {
   text: string;
   page?: number;
   doc_id: string;
+}
+
+function formatCitationText(text: string): string {
+  return (text || "")
+    .replace(/(?<!^)##\s/gm, "\n## ")
+    .replace(/\.\s+-\s+/g, ".\n- ");
 }
 
 interface Message {
@@ -33,6 +39,8 @@ interface FileItem {
 
 
 function ChatPageContent() {
+  const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({});
+  const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
   const searchParams = useSearchParams();
   const initialFileId = searchParams.get("fileId");
 
@@ -317,13 +325,18 @@ function ChatPageContent() {
                     {/* ✅ 显示引用来源 */}
                     {m.role === "assistant" && m.sources && m.sources.length > 0 && (
                       <div className="mt-3 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 border border-blue-200">
-                        <div className="flex items-center mb-3">
+                        <button type="button" className="flex w-full items-center justify-between mb-3 text-left" onClick={() => setExpandedPanels((s) => ({ ...s, [m.id]: !s[m.id] }))} aria-expanded={!!expandedPanels[m.id]}>
+                          <span className="flex items-center">
                           <BookOpen className="w-4 h-4 text-blue-600 mr-2" />
                           <span className="font-semibold text-gray-800 text-sm">
                             📖 引用来源（Rerank 排序）
                           </span>
-                        </div>
+                          <span className="ml-2 text-xs text-gray-600">共 {m.sources.length} 条</span>
+                          </span>
+                          <ChevronDown className={`h-4 w-4 transition-transform ${expandedPanels[m.id] ? "rotate-180" : ""}`} />
+                        </button>
                         
+                        {expandedPanels[m.id] && <>
                         <div className="space-y-3">
                           {m.sources.map((source) => (
                             <div 
@@ -346,9 +359,12 @@ function ChatPageContent() {
                               </div>
 
                               {/* 文本内容 */}
-                              <p className="text-sm text-gray-700 leading-relaxed mb-2 bg-gray-50 p-2 rounded">
-                                {source.text}
-                              </p>
+                              <div className="mb-2 rounded bg-gray-50 p-2">
+                                <div className={`whitespace-pre-line text-sm leading-relaxed text-gray-700 ${expandedCards[`${m.id}:${source.doc_id}`] ? "" : "line-clamp-3 overflow-hidden"}`}>
+                                  {formatCitationText(source.text)}
+                                </div>
+                              </div>
+                              {source.text.length > 220 && <button type="button" className="mb-2 text-xs text-blue-700" onClick={() => setExpandedCards((s) => ({ ...s, [`${m.id}:${source.doc_id}`]: !s[`${m.id}:${source.doc_id}`] }))}>{expandedCards[`${m.id}:${source.doc_id}`] ? "收起 ▴" : "展开详情 ▾"}</button>}
 
                               {/* 页码和文档ID */}
                               <div className="flex items-center justify-between text-xs text-gray-500">
@@ -367,6 +383,7 @@ function ChatPageContent() {
                             </div>
                           ))}
                         </div>
+                        </>}
                       </div>
                     )}
                   </div>
