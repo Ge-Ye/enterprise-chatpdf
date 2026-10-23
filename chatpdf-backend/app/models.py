@@ -21,6 +21,7 @@ class SourceDoc(BaseModel):
     text: str  # 文档片段内容
     page: Optional[int] = None  # 页码
     doc_id: str  # 文档ID
+    section_title: Optional[str] = None
 
 class ChatResponse(BaseModel):
     answer: str

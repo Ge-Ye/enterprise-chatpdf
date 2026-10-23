@@ -291,6 +291,24 @@ def filter_relevant_docs(reranked: List[Dict]) -> List[Dict]:
     ]
 
 
+def clean_citation_text(raw_text: str) -> Dict[str, str]:
+    text = str(raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    title = ""
+    match = re.match(r"^\s*#{1,6}\s*([^\n#]+)", text)
+    if match:
+        title = re.sub(r"\s*[（(]续[)）]\s*$", "", match.group(1)).strip()
+    text = re.sub(r"#{1,6}\s*[^\n#]+?\s*[（(]续[)）]\s*", "\n", text)
+    if title:
+        text = re.sub(rf"^\s*#{{1,6}}\s*{re.escape(title)}\s*(?:[（(]续[)）])?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[（(]续[)）]", "", text)
+    text = re.sub(r"[\s\n]+-\s+(?=[a-z])", " ", text)
+    text = re.sub(r"[ \t]+-\s+(?=[A-Z\u4e00-\u9fa5])", "\n- ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = "\n".join(line.strip() for line in text.splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return {"section_title": title, "text": text}
+
+
 def format_source_docs(
     reranked: List[Dict], top_n: int = 2, *, apply_threshold: bool = True
 ) -> List[SourceDoc]:
@@ -324,7 +342,8 @@ def format_source_docs(
             or _is_author_header_chunk(doc)
         ):
             text = text[abstract_match.start():]
-        text_preview = text[:200] + '...' if len(text) > 200 else text
+        citation = clean_citation_text(text)
+        text_preview = citation["text"]
         
         # 提取页码信息（如果有）
         meta = doc.get('meta', {})
@@ -338,7 +357,8 @@ def format_source_docs(
             relevance_score=round(relevance_score, 4),  # 保留4位小数
             text=text_preview,
             page=page,
-            doc_id=doc_id
+            doc_id=doc_id,
+            section_title=citation["section_title"] or None,
         ))
     
     return source_docs
