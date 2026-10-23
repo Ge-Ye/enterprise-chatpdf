@@ -1,139 +1,119 @@
-# ChatPDF：面向知识文档的流式问答
+# ChatPDF：跨境电商知识文档问答
 
-ChatPDF 是一个用于跨境电商 SOP、产品说明书、退换货政策与企业知识库资料的 PDF 问答应用。用户上传 PDF 后，服务端按页抽取文本、分块并生成向量；提问时先做轻量意图分流，再组合向量与全文召回、候选融合和 Cohere 重排，最后调用 DeepSeek 兼容接口生成答案。
+ChatPDF 面向亚马逊卖家政策、SOP 等中英混合 PDF，提供上传入库、检索增强问答与引用溯源。当前链路使用 SiliconFlow BGE-M3 向量、默认本地 BM25、SiliconFlow BGE Reranker、DeepSeek Chat，以及可折叠引用卡片。
 
-## 项目简介与核心亮点
+## 核心能力
 
-- **流式问答：** FastAPI 提供 POST SSE `/api/chat/stream`，按状态、文本片段、来源和结束事件返回；浏览器可以增量展示生成结果。
-- **前置意图路由：** `is_chitchat_or_persona_query` 在检索前拦截问候和助手身份问题；文档概览走独立路径，避免把所有输入都送入向量和重排服务。
-- **PDF 处理：** `pdfplumber` 按页抽取文本，保留页码元数据；上传接口返回后由 FastAPI `BackgroundTasks` 执行解析、索引。
-- **两阶段召回与排序：** ChromaDB 向量召回与 Elasticsearch 全文检索通过 RRF 合并，再由 Cohere Rerank 对候选进行查询相关性排序；Embedding 或 Rerank 出错时有降级路径。
-- **可配置运行环境：** API 密钥、模型、存储路径、CORS、端口和检索阈值由后端环境设置统一管理；前端 API 根地址由 `NEXT_PUBLIC_API_BASE_URL` 控制。
+- Dense 向量召回与 BM25 关键词召回合并，随后对候选进行 Rerank；Elasticsearch 通过 `USE_ES` / `ENABLE_ES` 可选启用，默认关闭。
+- ChromaDB 持久化集合 `chatpdf_collection_bge_m3`，cosine 距离。
+- 前端消费 SSE；引用卡片展示 Rerank 分数百分比、页码和 Chunk ID，面板及卡片支持折叠，并对旧文本做换行格式化。
+- PDF 按页解析，清理打印页脚/折行噪声，识别标题、列表并保留页码区间；切分代码维护续片标题。
 
-## 系统架构与检索流水线
+## 架构
 
 ```mermaid
-graph TD
-    A[用户 Query] --> B{前置意图判断}
-    B -->|闲聊 / 助手身份| C[跳过文档召回]
-    B -->|概览 / 文档级评估| D[首批文档切片 + 可用全文候选]
-    B -->|事实型文档问题| E[查询向量 Embedding]
-    E --> F[ChromaDB Top-K 向量召回]
-    B -->|事实型文档问题| G[Elasticsearch Top-K 全文召回]
-    F --> H[RRF 候选融合]
-    G --> H
-    H --> I[Cohere Rerank Top-N]
-    D --> J[组装上下文]
-    C --> J
-    I --> J
-    J --> K[DeepSeek 兼容 Chat Completions]
-    K --> L[SSE 状态 / 文本片段 / 来源 / done]
-    L --> M[Next.js 前端]
+flowchart LR
+  subgraph Ingest[离线入库]
+    U[POST /api/upload] --> P[upload.py: preprocess_and_index]
+    P --> X[pdf_parser.py: extract_document_text]
+    X --> C[chunker.py: chunk_text]
+    C --> E[embeddings.py: BGE-M3]
+    E --> V[vectorstore.py: ChromaClient]
+  end
+  subgraph Query[在线问答]
+    Q[Query] --> R[chat.py 意图分流与召回]
+    R --> D[Chroma 向量召回]
+    R --> B[bm25_retriever.py]
+    D --> M[候选合并]
+    B --> M
+    M --> RR[reranker.py: BGE Reranker]
+    RR --> N[邻片上下文扩展]
+    N --> L[generator.py: DeepSeek SSE]
+    RR --> S[sources 引用格式化]
+    L --> F[streaming.py: SSE]
+    S --> F
+    F --> UI[Next.js chat/page.tsx]
+  end
 ```
 
 ## 技术栈
 
-| 层次 | 技术 | 用途 |
-| --- | --- | --- |
-| 前端 | Next.js 15、React 19、TypeScript、Tailwind CSS 4 | 页面、PDF 上传、对话与 SSE 消费 |
-| API 服务 | Python、FastAPI、Uvicorn | 上传、文件列表、同步问答与流式问答 |
-| PDF 处理 | pdfplumber | 按页提取 PDF 文本 |
-| 向量检索 | ChromaDB PersistentClient | 保存并查询文本向量 |
-| 全文检索 | Elasticsearch Python Client | 文本匹配召回，可与向量结果融合 |
-| AI 服务 | Cohere SDK、DeepSeek OpenAI 兼容接口 | Embedding、Rerank、答案生成 |
-| 辅助依赖 | LlamaIndex、Pydantic、httpx | 依赖清单中的框架与数据/HTTP 支持；当前检索链路由 `app/services` 自行编排 |
+| 层 | 当前实现 |
+|---|---|
+| 前端 | Next.js 15.5.4、React 19.1、TypeScript 5、Tailwind CSS 4 |
+| 后端 | FastAPI 0.115.9、Uvicorn、Python |
+| PDF / 向量库 | pdfplumber 0.11.1、ChromaDB 1.0.2 |
+| Embedding / Rerank | SiliconFlow `BAAI/bge-m3` / `BAAI/bge-reranker-v2-m3` |
+| LLM | DeepSeek `deepseek-chat` |
+| 关键词检索 | 本地标准库 BM25；ES 可选 |
 
-## 目录结构
+## 目录
 
 ```text
 .
 ├── README.md
-├── .gitignore
+├── INTERVIEW_GUIDE.md
+├── docker-compose.yml
 ├── chatpdf-backend/
-│   ├── .env.example
-│   ├── requirements.txt
+│   ├── Dockerfile / requirements.txt / test_chat_retrieval.py
 │   └── app/
-│       ├── core/config.py       # 环境设置与路径解析
-│       ├── main.py              # FastAPI 应用、CORS、路由注册
-│       ├── models.py            # 请求与响应模型
-│       ├── routes/              # 上传、聊天、文件列表 API
-│       ├── services/            # PDF、分块、Embedding、检索、Rerank、生成
-│       ├── utils/streaming.py   # SSE 编码与断连清理
-│       └── data/                # 本地上传与 Chroma 持久化（忽略运行数据）
+│       ├── main.py / models.py
+│       ├── core/config.py
+│       ├── routes/{upload,chat,files}.py
+│       ├── services/{pdf_parser,chunker,embeddings,bm25_retriever,es_retriever,reranker,vectorstore,generator}.py
+│       ├── utils/streaming.py
+│       └── data/{uploads,chroma}/
 └── chatpdf-frontend/
-    ├── .env.example
-    ├── package.json
-    └── src/
-        ├── app/                 # Next.js 页面与路由
-        ├── components/          # 上传和聊天 UI
-        ├── hooks/               # 聊天状态/流式请求逻辑
-        └── lib/api.ts           # 统一 API 根地址与请求封装
+    ├── Dockerfile / package.json
+    └── src/{app,components,context,hooks,lib}/
 ```
 
-## 快速启动（Local Setup）
+## 快速开始
 
-### 方式一：Docker Compose 一键启动（推荐）
+### Docker Compose
 
-在仓库根目录准备后端环境文件，并填入 `DEEPSEEK_API_KEY`、`COHERE_API_KEY` 等服务凭据：
+在本机自行配置 `chatpdf-backend/.env`，至少提供 `SILICONFLOW_API_KEY` 和 `DEEPSEEK_API_KEY`；不要提交密钥。前端 API 地址可通过根目录环境变量 `NEXT_PUBLIC_API_BASE_URL` 配置，默认 `http://localhost:8000`。
 
-```powershell
-Copy-Item chatpdf-backend/.env.example chatpdf-backend/.env
-```
-
-可选地将根目录 `.env.example` 复制为 `.env`，设置浏览器可访问的 `NEXT_PUBLIC_API_BASE_URL`（默认 `http://localhost:8000`）。该值在前端镜像构建时写入客户端代码；部署到其他主机时应改成该主机可访问的 API 地址。
-
-启动前后端：
-
-```powershell
+```bash
 docker compose up -d --build
 ```
 
-打开 `http://localhost:3000`。Compose 会将 ChromaDB 和上传文件持久化到 `chatpdf-backend/app/data/chroma` 与 `chatpdf-backend/app/data/uploads`。查看服务日志可运行 `docker compose logs -f`；停止服务可运行 `docker compose down`（不会删除上述宿主机数据目录）。
+访问 `http://localhost:3000`。Chroma 与上传文件分别持久化至 `chatpdf-backend/app/data/chroma` 和 `chatpdf-backend/app/data/uploads`。
 
-### 1. 准备后端环境
+### 本地开发
 
-```powershell
+```bash
 cd chatpdf-backend
-Copy-Item .env.example .env
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python -m venv .venv
+# Windows: .\.venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-编辑 `chatpdf-backend/.env`，填写 `COHERE_API_KEY` 与 `DEEPSEEK_API_KEY`。若启用 Elasticsearch 全文召回，也要让 `ES_HOST` 指向可用实例；向量召回依赖 Cohere embedding。CORS 默认允许本地 Next.js 的 3000 端口，部署时请将 `ALLOWED_ORIGINS` 改成逗号分隔的实际前端来源。
-
-启动后端：
-
-```powershell
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-也可用 `python -m app.main` 启动；监听端口由 `BACKEND_PORT` 控制。
+另开终端：
 
-### 2. 准备前端
-
-在另一个终端执行：
-
-```powershell
+```bash
 cd chatpdf-frontend
-Copy-Item .env.example .env.local
 npm ci
 npm run dev
 ```
 
-浏览器打开 `http://localhost:3000`。`NEXT_PUBLIC_API_BASE_URL` 默认指向 `http://localhost:8000`；通过环境变量可切换到部署后的 FastAPI 地址。该变量会进入浏览器端构建，不应放置密钥。
+后端配置项定义于 `chatpdf-backend/app/core/config.py`，包括 SiliconFlow/DeepSeek Key、模型与 URL、ES 开关、Chroma/上传路径、端口、CORS。前端 `NEXT_PUBLIC_API_BASE_URL` 默认 `http://localhost:8000`，该值会进入浏览器构建，不应放密钥。
 
-### 3. 基本使用
-
-上传 PDF 后等待后台处理完成，再选择文档并提问。默认切分为 1200 字符、200 字符重叠；聊天请求默认 `top_k=5`，相关性来源阈值默认为 `0.30`。
-
-## API 概览
+## API
 
 | 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/upload` | 接收 `multipart/form-data` 的 PDF，返回文件 ID 并后台索引 |
-| GET | `/api/files` | 返回本地文件清单 |
-| POST | `/api/chat` | 等待完整答案后返回 JSON |
-| POST | `/api/chat/stream` | SSE 流式回答，事件包括 `status`、`chunk`、`sources`、`done`、`error` |
+|---|---|---|
+| POST | `/api/upload` | 上传 PDF 并后台索引 |
+| GET | `/api/files` | 文件列表 |
+| POST | `/api/chat` | JSON 问答 |
+| POST | `/api/chat/stream` | SSE 问答 |
+| GET | `/api/chat/stream` | GET 流式兼容入口 |
 
-> 当前上传实现以本地文件与本地 Chroma 持久化为主；生产部署应为上传存储、任务队列、访问控制、限流和多实例向量库制定独立方案。
+## Roadmap（尚未实现的演进方向）
+
+- 基于更多 PDF 版式样本改进跨页句法愈合和页眉页脚识别。
+- 泛化到任意层级的子条款切分和 Parent-Child Chunking。
+- 跨语言 Query 改写及检索评测集；以标注数据评估 Recall@K、MRR、nDCG。
+- RAGAS 等自动化离线评估，持续监测检索质量、忠实度和引用覆盖率。
