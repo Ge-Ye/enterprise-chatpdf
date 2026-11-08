@@ -66,12 +66,20 @@ def _split_long(text: str, limit: int) -> List[str]:
 
 
 def _page_for_offset(start: int, page_ranges: Optional[Sequence[Tuple[int, int, int]]]) -> int:
+    """Return the 1-based source page for a character offset."""
     if not page_ranges:
-        return 0
-    for range_start, range_end, page_num in page_ranges:
-        if range_start <= start < range_end:
+        return 1
+    for _range_start, range_end, page_num in page_ranges:
+        if start < range_end:
             return page_num
     return page_ranges[-1][2]
+
+
+def _overlap_tail(text: str, overlap: int) -> str:
+    """Take exactly the last `overlap` characters for the next chunk prefix."""
+    if overlap <= 0 or not text:
+        return ""
+    return text[-overlap:]
 
 
 def _is_list_line(line: str) -> bool:
@@ -198,22 +206,23 @@ def chunk_text(
     page_ranges: Optional[Sequence[Tuple[int, int, int]]] = None,
     doc_id: Optional[str] = None,
 ) -> List[dict]:
-    """Split only at explicit parser headings and protect colon-led list groups."""
+    """Split at parser headings/list groups and overlap adjacent chunks by `overlap` characters."""
     text = clean_pdf_text(text)
     if not text:
         return []
     chunk_size = max(1, chunk_size)
     overlap = max(0, min(overlap, chunk_size - 1))
     sections = _split_sections(text)
-    cores: List[Tuple[str, str]] = []
+    cores: List[Tuple[str, str, int]] = []
     for title, lines in sections:
         header = f"## {title}" if title else ""
         blocks = _blocks(lines)
         if not blocks and header:
-            cores.append((header, header))
+            cores.append((header, header, 0))
             continue
         current = header
         current_anchor = header or (blocks[0] if blocks else "")
+        current_overlap = 0
         for block in blocks:
             colon_locked = block.splitlines()[0].endswith((":", "："))
             if colon_locked and len(block) > 1600:
@@ -232,25 +241,35 @@ def chunk_text(
                         current_anchor = piece
                 else:
                     if current:
-                        cores.append((current, current_anchor))
+                        cores.append((current, current_anchor, current_overlap))
+                    overlap_text = (
+                        _overlap_tail(current, overlap)
+                        if len(current) > len(header)
+                        else ""
+                    )
                     continuation = f"## {title} (续)" if title else ""
-                    current = f"{continuation}\n{piece}" if continuation else piece
+                    parts = [part for part in (continuation, overlap_text, piece) if part]
+                    current = "\n".join(parts)
                     current_anchor = piece
+                    current_overlap = len(overlap_text)
         if current:
-            cores.append((current, current_anchor))
+            cores.append((current, current_anchor, current_overlap))
 
     chunks: List[dict] = []
     cursor = 0
-    for index, (core, anchor) in enumerate(cores):
-        core_start = text.find(anchor, cursor) if anchor else cursor
-        if core_start < 0:
-            core_start = cursor
-        core_end = min(len(text), core_start + len(anchor))
-        cursor = core_end
+    for index, (core, anchor, overlap_size) in enumerate(cores):
+        anchor_start = text.find(anchor, cursor) if anchor else cursor
+        if anchor_start < 0:
+            anchor_start = cursor
+        core_start = max(0, anchor_start - overlap_size)
+        anchor_end = min(len(text), anchor_start + len(anchor))
+        core_end = min(len(text), max(anchor_end, core_start + len(core)))
+        cursor = max(cursor, anchor_end)
         chunk = core
         meta = {
             "chunk_index": index,
             "page": _page_for_offset(core_start, page_ranges),
+            "page_base": 1,
             "start": core_start,
             "end": core_end,
         }

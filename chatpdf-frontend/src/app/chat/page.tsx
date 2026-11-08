@@ -2,18 +2,21 @@
 
 import { API_BASE_URL } from "@/lib/api";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, Upload, FileText, Send, BookOpen, ChevronDown } from "lucide-react";
+import CustomsExtractorPanel from "@/components/CustomsExtractorPanel";
 
 // ✅ 添加引用来源的数据结构
 interface SourceDoc {
   rank: number;
-  relevance_score: number;
+  // 概览来源没有 rerank 分数，后端返回 null，前端不得当作 0% 相关度展示
+  relevance_score: number | null;
   text: string;
   page?: number;
   doc_id: string;
+  source_kind?: "rerank" | "overview";
 }
 
 function formatCitationText(text: string): string {
@@ -34,11 +37,60 @@ interface FileItem {
   id: string;
   name: string;
   alias?: string;
+  status?: "processing" | "indexed" | "failed" | "unknown";
+  error?: string;
 }
 
+const FILE_STATUS_META: Record<string, { label: string; className: string }> = {
+  indexed: { label: "已索引", className: "bg-green-100 text-green-700" },
+  processing: { label: "索引中", className: "bg-blue-100 text-blue-700" },
+  failed: { label: "索引失败", className: "bg-red-100 text-red-700" },
+  unknown: { label: "状态未知", className: "bg-gray-100 text-gray-600" },
+};
+const fileStatusMeta = (status?: string) => FILE_STATUS_META[status ?? "unknown"] ?? FILE_STATUS_META.unknown;
 
+interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+// Mirror the backend bounds: keep only recent turns and stay within budget so
+// the transcript cannot bloat every request.
+const MAX_HISTORY_MESSAGES = 8;
+const MAX_HISTORY_MESSAGE_CHARS = 3000;
+const MAX_HISTORY_TOTAL_CHARS = 6000;
+// Client-side failure text is shown in the bubble but is not a model answer,
+// so it must never become conversation context for the next turn.
+const NON_HISTORY_ASSISTANT_PREFIXES = ["请求失败", "抱歉，未生成有效的回答"];
+
+function buildChatHistory(messages: Message[]): ChatTurn[] {
+  const selected: ChatTurn[] = [];
+  let total = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (selected.length >= MAX_HISTORY_MESSAGES) break;
+    const message = messages[i];
+    let content = message.content.trim();
+    if (!content) continue;
+    if (
+      message.role === "assistant"
+      && NON_HISTORY_ASSISTANT_PREFIXES.some((prefix) => content.startsWith(prefix))
+    ) continue;
+    if (content.length > MAX_HISTORY_MESSAGE_CHARS) {
+      const marker = "\n…\n";
+      const kept = MAX_HISTORY_MESSAGE_CHARS - marker.length;
+      const head = Math.floor((kept * 2) / 3);
+      const tail = kept - head;
+      content = `${content.slice(0, head)}${marker}${content.slice(-tail)}`;
+    }
+    if (total + content.length > MAX_HISTORY_TOTAL_CHARS) break;
+    selected.push({ role: message.role, content });
+    total += content.length;
+  }
+  return selected.reverse();
+}
 
 function ChatPageContent() {
+  const [activeRightTab, setActiveRightTab] = useState<"chat" | "customs">("chat");
   const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({});
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
   const searchParams = useSearchParams();
@@ -54,20 +106,32 @@ function ChatPageContent() {
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
-  // 加载可用文件列表
-  useEffect(() => {
-    const fetchFiles = async () => {
-      try {
-        const res = await fetch(`${API_BASE_URL}/files`);
-        if (!res.ok) throw new Error("加载文件失败");
-        const data = await res.json();
-        setAvailableFiles(data);
-      } catch (err) {
-        console.error("加载文件失败:", err);
-      }
-    };
-    fetchFiles();
+  const refreshFiles = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/files`);
+      if (!res.ok) throw new Error("加载文件失败");
+      const data = (await res.json()) as FileItem[];
+      setAvailableFiles(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("加载文件失败:", err);
+    }
   }, []);
+
+  // 加载可用文件列表（每条记录带索引状态）
+  useEffect(() => {
+    void refreshFiles();
+  }, [refreshFiles]);
+
+  const selectedFile = availableFiles.find((file) => file.id === currentFileId);
+  const selectedStatus = selectedFile?.status;
+  const isFileReady = !currentFileId || selectedStatus === "indexed" || selectedStatus === "unknown";
+
+  // 选中文件仍在索引时轮询文件列表，直到 indexed / failed
+  useEffect(() => {
+    if (selectedStatus !== "processing") return;
+    const timer = window.setInterval(() => void refreshFiles(), 2000);
+    return () => window.clearInterval(timer);
+  }, [selectedStatus, refreshFiles]);
 
   // 自动滚动到消息底部
   useEffect(() => {
@@ -79,6 +143,11 @@ function ChatPageContent() {
 
     if (!currentFileId) {
       alert("请先选择一个文件！");
+      return;
+    }
+
+    if (!isFileReady) {
+      alert(selectedStatus === "failed" ? "该文件索引失败，请重新上传后再提问。" : "文件正在建立索引，请稍候再提问。");
       return;
     }
 
@@ -96,10 +165,15 @@ function ChatPageContent() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    // Prior turns only: the current question is already `query`, and sending it
+    // twice would make the model treat it as old context.
+    const history = buildChatHistory(messages);
+
     try {
       const payload = {
         query: input,
         file_id: currentFileId,
+        history,
       };
 
       console.log("📤 发送请求:", payload);
@@ -243,28 +317,39 @@ function ChatPageContent() {
             </div>
           ) : (
             <div className="space-y-2">
-              {availableFiles.map((file) => (
-                <div
-                  key={file.id}
-                  onClick={() => {
-                    setCurrentFileId(file.id);
-                    setMessages([]);
-                  }}
-                  className={`p-3 border-2 rounded-lg cursor-pointer transition ${
-                    file.id === currentFileId
-                      ? "bg-blue-50 border-blue-500"
-                      : "bg-gray-50 border-gray-200 hover:border-blue-300"
-                  }`}
-                >
-                  <div className="flex items-center">
-                    <FileText className="w-5 h-5 text-blue-600 mr-2" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{file.alias || file.name}</p>
-                      <p className="text-xs text-gray-500 truncate">{file.id}</p>
+              {availableFiles.map((file) => {
+                const meta = fileStatusMeta(file.status);
+                const unavailable = file.status === "processing" || file.status === "failed";
+                return (
+                  <div
+                    key={file.id}
+                    onClick={() => {
+                      if (unavailable) return;
+                      setCurrentFileId(file.id);
+                      setMessages([]);
+                    }}
+                    title={unavailable ? (file.status === "failed" ? "索引失败，请重新上传该文件" : "索引完成后可选择") : undefined}
+                    className={`p-3 border-2 rounded-lg transition ${
+                      unavailable ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                    } ${
+                      file.id === currentFileId
+                        ? "bg-blue-50 border-blue-500"
+                        : "bg-gray-50 border-gray-200 hover:border-blue-300"
+                    }`}
+                  >
+                    <div className="flex items-center">
+                      <FileText className="w-5 h-5 text-blue-600 mr-2" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{file.alias || file.name}</p>
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <p className="text-xs text-gray-500 truncate">{file.id}</p>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${meta.className}`}>{meta.label}</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               <button
                 onClick={() => {
@@ -281,7 +366,7 @@ function ChatPageContent() {
           <div className="mt-6 pt-6 border-t">
             <h3 className="text-sm font-semibold mb-2">💡 使用提示</h3>
             <ul className="text-xs text-gray-600 space-y-1">
-              <li>• 上传 PDF 文件后可开始聊天</li>
+              <li>• 上传后需等待索引完成再提问</li>
               <li>• 提问应与所选文件内容相关</li>
               <li>• AI 将基于文件内容进行回答</li>
             </ul>
@@ -290,6 +375,15 @@ function ChatPageContent() {
 
         {/* 聊天区域 */}
         <div className="lg:col-span-3 flex flex-col bg-white rounded-xl shadow-lg">
+          <div className="flex gap-2 border-b border-gray-200 px-4 pt-4" role="tablist" aria-label="右侧工作区">
+            <button type="button" role="tab" aria-selected={activeRightTab === "chat"} onClick={() => setActiveRightTab("chat")} className={`rounded-t-lg px-4 py-2 text-sm font-medium transition ${activeRightTab === "chat" ? "border-b-2 border-blue-600 text-blue-700" : "text-gray-500 hover:text-gray-800"}`}>
+              💬 智能问答 (RAG)
+            </button>
+            <button type="button" role="tab" aria-selected={activeRightTab === "customs"} onClick={() => setActiveRightTab("customs")} className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-sm font-medium transition ${activeRightTab === "customs" ? "border-b-2 border-blue-600 text-blue-700" : "text-gray-500 hover:text-gray-800"}`}>
+              📋 关务单据提取与质检 <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700">AI质检</span>
+            </button>
+          </div>
+          <div hidden={activeRightTab !== "chat"} className="flex min-h-0 flex-1 flex-col">
           {!currentFileId && (
             <div className="bg-yellow-50 border-b border-yellow-200 px-6 py-3 text-sm text-yellow-700">
               ⚠️ 请先选择或上传一个文件
@@ -329,7 +423,9 @@ function ChatPageContent() {
                           <span className="flex items-center">
                           <BookOpen className="w-4 h-4 text-blue-600 mr-2" />
                           <span className="font-semibold text-gray-800 text-sm">
-                            📖 引用来源（Rerank 排序）
+                            {m.sources.some((source) => source.source_kind === "overview")
+                              ? "📖 引用来源（含文档首部概览）"
+                              : "📖 引用来源（Rerank 排序）"}
                           </span>
                           <span className="ml-2 text-xs text-gray-600">共 {m.sources.length} 条</span>
                           </span>
@@ -350,12 +446,21 @@ function ChatPageContent() {
                                     {source.rank}
                                   </span>
                                   <span className="text-xs font-medium text-gray-700">
-                                    相关度排名 #{source.rank}
+                                    {source.source_kind === "overview" ? "片段顺序" : "相关度排名"} #{source.rank}
                                   </span>
                                 </div>
-                                <span className="text-xs font-semibold text-blue-600 bg-blue-100 px-2 py-1 rounded">
-                                  {(source.relevance_score * 100).toFixed(1)}%
-                                </span>
+                                {source.source_kind === "overview" || typeof source.relevance_score !== "number" ? (
+                                  <span
+                                    className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-1 rounded"
+                                    title="文档首部片段，未参与 Rerank 排序，因此没有相关度分数"
+                                  >
+                                    概览片段 · 文档首部
+                                  </span>
+                                ) : (
+                                  <span className="text-xs font-semibold text-blue-600 bg-blue-100 px-2 py-1 rounded">
+                                    {(source.relevance_score * 100).toFixed(1)}%
+                                  </span>
+                                )}
                               </div>
 
                               {/* 文本内容 */}
@@ -371,7 +476,7 @@ function ChatPageContent() {
                                 {source.page !== null && source.page !== undefined ? (
                                   <span className="flex items-center">
                                     <FileText className="w-3 h-3 mr-1" />
-                                    第 {source.page + 1} 页
+                                    第 {source.page} 页
                                   </span>
                                 ) : (
                                   <span>未知页码</span>
@@ -412,25 +517,49 @@ function ChatPageContent() {
             <div ref={bottomRef}></div>
           </div>
 
+          {currentFileId && !isFileReady && (
+            <div
+              role="status"
+              className="mx-4 mb-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800"
+            >
+              {selectedStatus === "failed"
+                ? "该文件索引失败，无法提问，请重新上传该文件。"
+                : "文件正在建立索引，完成后才能提问；就绪后此处会自动消失。"}
+            </div>
+          )}
+
           <div className="border-t bg-gray-50 p-4">
             <div className="flex items-center space-x-3">
               <input
                 type="text"
                 className="flex-1 rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder={currentFileId ? "请输入您的问题..." : "请先选择一个文件"}
+                placeholder={!currentFileId
+                  ? "请先选择一个文件"
+                  : !isFileReady
+                    ? (selectedStatus === "failed" ? "文件索引失败，请重新上传" : "文件索引中，请稍候…")
+                    : "请输入您的问题..."}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                disabled={!currentFileId || isLoading}
+                disabled={!currentFileId || !isFileReady || isLoading}
               />
               <button
                 onClick={handleSend}
-                disabled={!currentFileId || isLoading || !input.trim()}
+                disabled={!currentFileId || !isFileReady || isLoading || !input.trim()}
                 className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
                 <Send className="w-5 h-5" />
               </button>
             </div>
+            {currentFileId && isFileReady && (
+              <p className="mt-2 px-1 text-xs text-gray-500">
+                支持多轮追问，例如“它有什么限制？”“那第二条呢？”
+              </p>
+            )}
+          </div>
+          </div>
+          <div hidden={activeRightTab !== "customs"} className="min-h-0 flex-1">
+            <CustomsExtractorPanel fileId={currentFileId} fileName={availableFiles.find((file) => file.id === currentFileId)?.alias || availableFiles.find((file) => file.id === currentFileId)?.name || null} />
           </div>
         </div>
       </div>

@@ -45,7 +45,3 @@ class SiliconFlowReranker:
 
         reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
         return reranked[:top_n]
-
-
-# Kept as an import alias for callers that still use the former class name.
-CohereReranker = SiliconFlowReranker

@@ -151,12 +151,12 @@ def _format_page_lines(lines: List[dict]) -> str:
 
 
 def combine_pages(pages: Sequence[str]) -> Tuple[str, List[Tuple[int, int, int]]]:
-    """Join cleaned page text into one stream and retain source page ranges."""
+    """Join cleaned page text and retain 1-based source page ranges."""
     parts: List[str] = []
     page_ranges: List[Tuple[int, int, int]] = []
     offset = 0
     previous = ""
-    for page_num, raw_page in enumerate(pages):
+    for page_num, raw_page in enumerate(pages, start=1):
         page_text = clean_page_text(raw_page)
         if not page_text:
             continue

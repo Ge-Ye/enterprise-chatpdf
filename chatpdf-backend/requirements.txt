@@ -11,6 +11,7 @@ llama_index==0.12.36
 elasticsearch==8.18.0
 sse-starlette==2.3.5
 python-dotenv==1.0.1
+openai
+pymupdf>=1.24,<2.0
 aiofiles==24.1.0
 typing-extensions>=4.12.2
-cohere

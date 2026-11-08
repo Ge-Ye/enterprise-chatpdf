@@ -63,6 +63,23 @@ def es_search_text(
         return []
 
 
+def es_delete_by_file_id(index: str, file_id: str) -> bool:
+    """Remove all Elasticsearch chunks for one uploaded document."""
+    try:
+        es = Elasticsearch([settings.ES_HOST])
+        es.delete_by_query(
+            index=index,
+            query={"term": {"file_id": file_id}},
+            refresh=True,
+            conflicts="proceed",
+        )
+        logger.info(f"✅ ES 已删除文件索引: {file_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ ES 删除文件索引失败: {file_id}: {e}", exc_info=True)
+        return False
+
+
 def rrf_fusion(ranked_lists: List[List[str]], k: int = 60) -> Dict[str, float]:
     """
     RRF (Reciprocal Rank Fusion) 融合算法

@@ -12,7 +12,9 @@ RUN apt-get update \
     && useradd --system --gid app --home-dir /app app
 
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
 
 COPY --chown=app:app app ./app
 RUN mkdir -p /app/app/data/chroma /app/app/data/uploads \

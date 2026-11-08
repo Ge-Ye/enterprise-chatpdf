@@ -14,6 +14,9 @@ class _FakeChroma:
     def first_chunks(self, file_id=None, limit=5):
         return []
 
+    def all_chunks(self, file_id=None):
+        return []
+
     def count(self):
         return 0
 
@@ -31,7 +34,7 @@ class _FakeReranker:
 with (
     patch("app.services.vectorstore.ChromaClient", _FakeChroma),
     patch("app.services.embeddings.EmbeddingClient", _FakeEmbeddings),
-    patch("app.services.reranker.CohereReranker", _FakeReranker),
+    patch("app.services.reranker.SiliconFlowReranker", _FakeReranker),
 ):
     from app.routes import chat
 
@@ -58,11 +61,10 @@ class ChatRetrievalTests(unittest.TestCase):
         self.assertNotIn("rerank_score", merged[-1])
         self.assertEqual(merged[-1]["score"], 0.02)
 
-    def test_summary_route_keeps_ordered_overview_scores_and_sources(self):
+    def test_summary_route_keeps_ordered_overview_chunks_without_synthetic_scores(self):
         with (
             patch.object(chat.emb_client, "embed_texts") as embed,
             patch.object(chat.reranker, "rerank") as rerank,
-            patch.object(chat, "_es_search", return_value=[]),
             patch.object(chat.chroma, "first_chunks", return_value=self.overview_chunks) as first_chunks,
         ):
             selected, sources = chat.retrieve_and_rank(self.request("总结一下"))
@@ -70,9 +72,11 @@ class ChatRetrievalTests(unittest.TestCase):
         embed.assert_not_called()
         rerank.assert_not_called()
         first_chunks.assert_called_once_with("file-1", limit=8)
-        self.assertEqual([source.relevance_score for source in sources], [0.98, 0.95])
-        self.assertEqual(len(sources), 2)
-        self.assertEqual(selected[0]["rerank_score"], 0.98)
+        self.assertEqual([doc["id"] for doc in selected], ["overview-1", "overview-2", "overview-3"])
+        self.assertNotIn("rerank_score", selected[0])
+        self.assertEqual([source.doc_id for source in sources], ["overview-1", "overview-2"])
+        self.assertTrue(all(source.source_kind == "overview" for source in sources))
+        self.assertTrue(all(source.relevance_score is None for source in sources))
 
     def test_async_pure_summary_skips_embedding_and_rerank(self):
         async def inline_to_thread(func, *args, **kwargs):
@@ -82,7 +86,6 @@ class ChatRetrievalTests(unittest.TestCase):
             with (
                 patch.object(chat.emb_client, "embed_texts") as embed,
                 patch.object(chat.reranker, "rerank") as rerank,
-                patch.object(chat, "_es_search", return_value=[]),
                 patch.object(chat.chroma, "first_chunks", return_value=self.overview_chunks) as first_chunks,
                 patch.object(chat.asyncio, "to_thread", side_effect=inline_to_thread),
             ):
@@ -93,10 +96,12 @@ class ChatRetrievalTests(unittest.TestCase):
                 return result
 
         selected, sources = asyncio.run(run())
-        self.assertEqual([source.relevance_score for source in sources], [0.98, 0.95])
         self.assertEqual(len(selected), 3)
+        self.assertEqual([source.source_kind for source in sources], ["overview", "overview"])
+        self.assertTrue(all(source.relevance_score is None for source in sources))
+        self.assertNotIn("rerank_score", selected[0])
 
-    def test_author_header_moves_after_summary_content_and_gets_lower_score(self):
+    def test_author_header_moves_after_summary_content(self):
         author_header = {
             "id": "authors",
             "text": "HugoTouvron∗ LouisMartin† KevinStone‡",
@@ -116,8 +121,7 @@ class ChatRetrievalTests(unittest.TestCase):
         )
 
         self.assertEqual([doc["id"] for doc in merged], ["abstract", "intro", "authors"])
-        self.assertEqual(merged[0]["rerank_score"], 0.98)
-        self.assertEqual(merged[2]["rerank_score"], 0.50)
+        self.assertTrue(all("rerank_score" not in doc for doc in merged))
 
     def test_toc_filter_author_order_and_clean_preview(self):
         toc = {"id": "toc", "text": "Contents 1 Introduction 3 . . . 5"}
@@ -125,10 +129,12 @@ class ChatRetrievalTests(unittest.TestCase):
             "id": "author-abstract",
             "text": "HugoTouvron∗ LouisMartin† KevinStone‡ " + ("authors " * 35)
             + "Abstract Llama 2 is a collection of pretrained language models.",
+            "rerank_score": 0.80,
         }
         clean_abstract = {
             "id": "clean-abstract",
             "text": "Llama 2, a collection of pretrained language models for dialogue.",
+            "rerank_score": 0.90,
         }
 
         self.assertTrue(chat._is_toc_chunk(toc))
@@ -146,7 +152,7 @@ class ChatRetrievalTests(unittest.TestCase):
         merged = chat._merge_overview_and_candidates([toc], [], limit=2)
         self.assertEqual([doc["id"] for doc in merged], ["toc"])
 
-    def test_evaluation_sources_lead_with_query_match_and_differ_from_summary(self):
+    def test_evaluation_sources_lead_with_query_match_while_summary_has_overview_sources(self):
         author_header = {
             "id": "authors",
             "text": "HugoTouvron∗ LouisMartin† KevinStone‡",
@@ -156,8 +162,13 @@ class ChatRetrievalTests(unittest.TestCase):
             "id": "abstract",
             "text": "Abstract We introduce a language model and describe its evaluation.",
             "meta": {"page": 0},
+            "rerank_score": 0.70,
         }
-        intro = {"id": "intro", "text": "Introduction: the work addresses a key challenge."}
+        intro = {
+            "id": "intro",
+            "text": "Introduction: the work addresses a key challenge.",
+            "rerank_score": 0.60,
+        }
         conclusion = {
             "id": "conclusion",
             "text": "The results show improved instruction following and safety.",
@@ -168,7 +179,7 @@ class ChatRetrievalTests(unittest.TestCase):
         with (
             patch.object(chat.emb_client, "embed_texts", return_value=[[0.1, 0.2]]),
             patch.object(chat, "_vector_search", return_value=[]),
-            patch.object(chat, "_es_search", return_value=[]),
+            patch.object(chat, "_keyword_search", return_value=[]),
             patch.object(chat, "_merge_candidates", return_value=[conclusion]),
             patch.object(chat, "_finalize_ranking", side_effect=finalizations),
             patch.object(chat.chroma, "first_chunks", return_value=[author_header, abstract, intro]),
@@ -179,11 +190,12 @@ class ChatRetrievalTests(unittest.TestCase):
             )
 
         self.assertEqual([source.doc_id for source in summary_sources], ["abstract", "intro"])
+        self.assertTrue(all(source.source_kind == "overview" for source in summary_sources))
+        self.assertTrue(all(source.relevance_score is None for source in summary_sources))
         self.assertEqual([source.doc_id for source in evaluation_sources], ["conclusion", "abstract"])
-        self.assertNotEqual(
-            [source.doc_id for source in summary_sources],
-            [source.doc_id for source in evaluation_sources],
-        )
+        self.assertEqual([source.source_kind for source in evaluation_sources], ["rerank", "overview"])
+        self.assertEqual(evaluation_sources[0].relevance_score, 0.91)
+        self.assertIsNone(evaluation_sources[1].relevance_score)
 
     def test_passive_sync_fallback_keeps_context_but_returns_no_weak_sources(self):
         candidates = [{"id": "raw", "text": "raw candidate", "score": 0.02}]
@@ -222,21 +234,98 @@ class ChatRetrievalTests(unittest.TestCase):
         self.assertFalse(any(doc.get("rerank_score") in (0.98, 0.95) for doc in selected))
         self.assertEqual(sources, [])
 
-    def test_source_formatting_treats_none_scores_as_zero(self):
+    def test_source_formatting_skips_documents_without_usable_scores(self):
         sources = chat.format_source_docs(
             [{"id": "1", "text": "abc", "rerank_score": None, "score": None}],
             apply_threshold=False,
         )
 
+        self.assertEqual(sources, [])
+        scored = chat.format_source_docs(
+            [{"id": "2", "text": "abc", "rerank_score": 0.8}],
+            apply_threshold=False,
+        )
+        self.assertEqual(len(scored), 1)
+        self.assertEqual(scored[0].relevance_score, 0.8)
+        self.assertEqual(scored[0].source_kind, "rerank")
+
+    def test_overview_sources_have_no_score_and_are_not_threshold_filtered(self):
+        sources = chat.format_source_docs(
+            [{"id": "head", "text": "document head"}],
+            apply_threshold=False,
+            overview_ids={"head"},
+        )
+
         self.assertEqual(len(sources), 1)
-        self.assertEqual(sources[0].relevance_score, 0.0)
+        self.assertEqual(sources[0].source_kind, "overview")
+        self.assertIsNone(sources[0].relevance_score)
 
     def test_content_analysis_phrases_are_not_persona_chitchat(self):
         self.assertFalse(chat.is_chitchat_or_persona_query("你觉得摘要部分说明了什么？"))
         self.assertFalse(chat.is_chitchat_or_persona_query("你怎么看结论？"))
         self.assertTrue(chat.is_chitchat_or_persona_query("请介绍一下你自己"))
 
-    def test_sync_embedding_failure_falls_back_to_es_and_first_chunks(self):
+    def test_english_questions_are_not_misread_as_chitchat(self):
+        for query in (
+            "What does this document say about shipping?",
+            "Which countries are restricted for selling?",
+            "How do I handle a high-value return?",
+            "What is the history of this policy?",
+        ):
+            self.assertFalse(chat.is_chitchat_or_persona_query(query), query)
+
+    def test_english_greetings_remain_chitchat(self):
+        for query in (
+            "hi", "Hi!", "hello", "hello there", "hey", "thanks",
+            "thank you", "how are you?",
+        ):
+            self.assertTrue(chat.is_chitchat_or_persona_query(query), query)
+
+    def test_greeting_prefix_keeps_substantive_english_question(self):
+        self.assertFalse(
+            chat.is_chitchat_or_persona_query("Hello, which products need approval?")
+        )
+
+    def test_english_question_enters_retrieval_pipeline(self):
+        request = self.request("What does this document say about shipping?")
+        with (
+            patch.object(chat.emb_client, "embed_texts", return_value=[[0.1, 0.2]]) as embed,
+            patch.object(chat, "_vector_search", return_value=[]),
+            patch.object(chat, "_keyword_search", return_value=[]),
+            patch.object(chat, "_merge_candidates", return_value=[]),
+            patch.object(chat, "_finalize_ranking", return_value=([], [], [])),
+            patch.object(chat.chroma, "first_chunks", return_value=[]),
+        ):
+            selected, sources = chat.retrieve_and_rank(request)
+
+        embed.assert_called_once_with([request.query])
+        self.assertEqual((selected, sources), ([], []))
+
+    def test_english_greeting_skips_retrieval(self):
+        with (
+            patch.object(chat.emb_client, "embed_texts") as embed,
+            patch.object(chat.reranker, "rerank") as rerank,
+        ):
+            selected, sources = chat.retrieve_and_rank(self.request("hello"))
+
+        embed.assert_not_called()
+        rerank.assert_not_called()
+        self.assertEqual((selected, sources), ([], []))
+
+    def test_async_english_greeting_skips_retrieval(self):
+        async def run():
+            with (
+                patch.object(chat.emb_client, "embed_texts") as embed,
+                patch.object(chat.reranker, "rerank") as rerank,
+            ):
+                result = await chat.retrieve_and_rank_async(self.request("hi"))
+                embed.assert_not_called()
+                rerank.assert_not_called()
+                return result
+
+        self.assertEqual(asyncio.run(run()), ([], []))
+
+    def test_sync_embedding_failure_falls_back_to_keyword_and_first_chunks(self):
         request = self.request("介绍一下llama2的参数")
         with (
             patch.object(
@@ -245,7 +334,7 @@ class ChatRetrievalTests(unittest.TestCase):
                 side_effect=RuntimeError("Server disconnected without sending a response."),
             ),
             patch.object(chat, "_vector_search") as vector_search,
-            patch.object(chat, "_es_search", return_value=[]) as es_search,
+            patch.object(chat, "_keyword_search", return_value=[]) as keyword_search,
             patch.object(chat, "_merge_candidates", return_value=[]),
             patch.object(chat, "_finalize_ranking", return_value=([], [], [])),
             patch.object(chat.chroma, "first_chunks", return_value=self.overview_chunks[:2]),
@@ -253,11 +342,11 @@ class ChatRetrievalTests(unittest.TestCase):
             selected, sources = chat.retrieve_and_rank(request)
 
         vector_search.assert_not_called()
-        es_search.assert_called_once_with(request)
+        keyword_search.assert_called_once_with(request, request.query)
         self.assertEqual(len(selected), 2)
         self.assertEqual(sources, [])
 
-    def test_async_embedding_failure_falls_back_to_es_and_first_chunks(self):
+    def test_async_embedding_failure_falls_back_to_keyword_and_first_chunks(self):
         request = self.request("介绍一下llama2的参数")
 
         async def run():
@@ -268,18 +357,39 @@ class ChatRetrievalTests(unittest.TestCase):
                     side_effect=RuntimeError("Server disconnected without sending a response."),
                 ),
                 patch.object(chat, "_vector_search") as vector_search,
-                patch.object(chat, "_es_search", return_value=[]) as es_search,
+                patch.object(chat, "_keyword_search", return_value=[]) as keyword_search,
                 patch.object(chat, "_merge_candidates", return_value=[]),
                 patch.object(chat.chroma, "first_chunks", return_value=self.overview_chunks[:2]),
             ):
                 result = await chat.retrieve_and_rank_async(request)
-                return result, vector_search, es_search
+                return result, vector_search, keyword_search
 
-        (selected, sources), vector_search, es_search = asyncio.run(run())
+        (selected, sources), vector_search, keyword_search = asyncio.run(run())
         vector_search.assert_not_called()
-        es_search.assert_called_once_with(request)
+        keyword_search.assert_called_once_with(request)
         self.assertEqual(len(selected), 2)
         self.assertEqual(sources, [])
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def _embedding_client(http_client):
+    """Build an EmbeddingClient around a fake HTTP transport without touching app settings."""
+    client = object.__new__(app.services.embeddings.EmbeddingClient)
+    client._api_key = "test-key"
+    client.base_url = "https://example.test/v1"
+    client.model = "test-model"
+    client._http_client = http_client
+    return client
 
 
 class EmbeddingRetryTests(unittest.TestCase):
@@ -293,7 +403,7 @@ class EmbeddingRetryTests(unittest.TestCase):
                 return 0
 
         class _Client:
-            def get_or_create_collection(self, name):
+            def get_or_create_collection(self, name, metadata=None):
                 return _Collection()
 
         with patch.object(
@@ -311,10 +421,10 @@ class EmbeddingRetryTests(unittest.TestCase):
             self.assertEqual(pool._max_keepalive_connections, 5)
             self.assertEqual(pool._max_connections, 10)
             self.assertEqual(pool._keepalive_expiry, 60.0)
-            self.assertEqual(http_client.timeout.connect, 6.0)
-            self.assertEqual(http_client.timeout.read, 6.0)
-            self.assertEqual(http_client.timeout.write, 6.0)
-            self.assertEqual(http_client.timeout.pool, 5.0)
+            self.assertEqual(http_client.timeout.connect, 15.0)
+            self.assertEqual(http_client.timeout.read, 15.0)
+            self.assertEqual(http_client.timeout.write, 15.0)
+            self.assertEqual(http_client.timeout.pool, 15.0)
         finally:
             http_client.close()
 
@@ -322,63 +432,59 @@ class EmbeddingRetryTests(unittest.TestCase):
         class _TransientThenSuccess:
             calls = 0
 
-            def embed(self, **kwargs):
+            def post(self, url, headers=None, json=None):
                 self.calls += 1
-                self.asserted_retries = kwargs["request_options"]["max_retries"]
-                self.asserted_timeout = kwargs["request_options"].get("timeout_in_seconds")
+                self.url = url
+                self.headers = headers
+                self.payload = json
                 if self.calls == 1:
                     raise httpx.RemoteProtocolError("Server disconnected without sending a response")
-                return SimpleNamespace(embeddings=[[0.1, 0.2]])
+                return _FakeHttpResponse({"data": [{"embedding": [0.1, 0.2]}]})
 
-        client = object.__new__(app.services.embeddings.EmbeddingClient)
-        client.provider = "cohere"
-        client.model = "test-model"
-        client.client = _TransientThenSuccess()
+        http_client = _TransientThenSuccess()
+        client = _embedding_client(http_client)
 
         with patch("app.services.embeddings.time.sleep") as sleep:
             embeddings = client.embed_texts(["query"])
 
         self.assertEqual(embeddings, [[0.1, 0.2]])
-        self.assertEqual(client.client.calls, 2)
-        self.assertEqual(client.client.asserted_retries, 0)
-        self.assertIsNone(client.client.asserted_timeout)
+        self.assertEqual(http_client.calls, 2)
+        self.assertEqual(http_client.url, "https://example.test/v1/embeddings")
+        self.assertEqual(http_client.headers["Authorization"], "Bearer test-key")
         sleep.assert_called_once_with(0.2)
 
-    def test_batch_embedding_gets_extended_request_timeout(self):
+    def test_embed_texts_sends_batch_payload_to_configured_endpoint(self):
         class _Success:
-            request_options = None
+            def post(self, url, headers=None, json=None):
+                self.payload = json
+                return _FakeHttpResponse(
+                    {"data": [{"embedding": [0.1]}, {"embedding": [0.3]}]}
+                )
 
-            def embed(self, **kwargs):
-                self.request_options = kwargs["request_options"]
-                return SimpleNamespace(embeddings=[[0.1, 0.2], [0.3, 0.4]])
+        http_client = _Success()
+        client = _embedding_client(http_client)
 
-        client = object.__new__(app.services.embeddings.EmbeddingClient)
-        client.provider = "cohere"
-        client.model = "test-model"
-        client.client = _Success()
+        self.assertEqual(client.embed_texts(["one", "two"]), [[0.1], [0.3]])
+        self.assertEqual(http_client.payload["model"], "test-model")
+        self.assertEqual(http_client.payload["input"], ["one", "two"])
 
-        self.assertEqual(len(client.embed_texts(["one", "two"])), 2)
-        self.assertEqual(client.client.request_options["timeout_in_seconds"], 15.0)
-
-    def test_embed_texts_stops_after_one_manual_retry(self):
+    def test_embed_texts_stops_after_retry_budget(self):
         class _AlwaysDisconnected:
             calls = 0
 
-            def embed(self, **kwargs):
+            def post(self, url, headers=None, json=None):
                 self.calls += 1
                 raise httpx.RemoteProtocolError("Server disconnected without sending a response")
 
-        client = object.__new__(app.services.embeddings.EmbeddingClient)
-        client.provider = "cohere"
-        client.model = "test-model"
-        client.client = _AlwaysDisconnected()
+        http_client = _AlwaysDisconnected()
+        client = _embedding_client(http_client)
 
         with patch("app.services.embeddings.time.sleep") as sleep:
             with self.assertRaises(httpx.RemoteProtocolError):
                 client.embed_texts(["query"])
 
-        self.assertEqual(client.client.calls, 2)
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(http_client.calls, 3)
+        self.assertEqual(sleep.call_count, 2)
 
 
 if __name__ == "__main__":
