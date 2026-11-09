@@ -6,10 +6,10 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-15.5_(App_Router)-000000?style=flat-square&logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-15.5-000000?style=flat-square&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![React](https://img.shields.io/badge/React-19.1-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
-[![ChromaDB](https://img.shields.io/badge/ChromaDB-1.0-FF6F61?style=flat-square)](https://www.trychroma.com/)
-[![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek_&_Qwen_VL-4D6BFE?style=flat-square)](https://www.deepseek.com/)
+[![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek_Chat-4D6BFE?style=flat-square)](https://www.deepseek.com/)
+[![Qwen](https://img.shields.io/badge/VLM-Qwen3_VL_%26_2.5-615CED?style=flat-square)](https://siliconflow.cn/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 
 [核心亮点](#-核心工程亮点) •
@@ -35,20 +35,23 @@
 ## ✨ 核心工程亮点
 
 ### 1. 高召回、低幻觉的进阶 RAG 管线
-- **多路召回 + RRF 融合 + Cross-Encoder 重排**：并行执行语义向量检索与关键词匹配，经 RRF 算法融合候选集后，通过 `BAAI/bge-reranker-v2-m3` 计算细粒度语义相关性，截断低置信度噪声片段（$\text{Score} < 0.30$）。
-- **意图路由与冷启动兜底**：自动识别“闲聊 / 全文总结 / 垂直问答”三类意图；总结类问题优先注入文档首部概览切片；支持 Top 命中切片的**前后相邻切片动态扩展（Neighbor Expansion）**，防止跨段语义断裂。
-- **多轮追问改写与防污染设计**：针对“那第二条呢？”、“它有什么限制？”等省略式追问，检索改写器仅融合历史**用户提问**补全检索词，严格隔离模型历史回答参与检索，从根源上杜绝“模型旧幻觉自我强化”。
-- **可解释性引用溯源**：SSE 流式输出结束后下发 `source_docs` 元数据，前端精准渲染 1-based 页码区间、Rerank 置信度及片段属性（检索命中 vs. 概览注入）。
+
+* **多路召回 + RRF 融合 + Cross-Encoder 重排**：并行执行语义向量检索与关键词匹配，经 RRF 算法融合候选集后，通过 `BAAI/bge-reranker-v2-m3` 计算细粒度语义相关性，截断低置信度噪声片段（$\text{Score} < 0.30$）。
+* **意图路由与冷启动兜底**：自动识别“闲聊 / 全文总结 / 垂直问答”三类意图；总结类问题优先注入文档首部概览切片；支持 Top 命中切片的**前后相邻切片动态扩展（Neighbor Expansion）**，防止跨段语义断裂。
+* **多轮追问改写与防污染设计**：针对“那第二条呢？”、“它有什么限制？”等省略式追问，检索改写器仅融合历史**用户提问**补全检索词，严格隔离模型历史回答参与检索，从根源上杜绝“模型旧幻觉自我强化”。
+* **可解释性引用溯源**：SSE 流式输出结束后下发 `source_docs` 元数据，前端精准渲染 1-based 页码区间、Rerank 置信度及片段属性（检索命中 vs. 概览注入）。
 
 ### 2. 报关单“文本 + 视觉”双路并发交叉核验
-- **异构模型双路印证**：文本路通过 `pdfplumber` 提取结构化文本与表格交由 `Qwen2.5-32B-Instruct` 解析全量字段；视觉路通过 `PyMuPDF` 渲染高分图像交由 `Qwen3-VL-8B-Instruct` 独立提取关键核验字段，解决印章遮挡与排版错位问题。
-- **领域级合规规则引擎**：内置强业务约束校验，包括单行核算（$\text{总价} = \text{数量} \times \text{单价}$）、物理逻辑校验（$\text{毛重} > \text{净重}$）、18 位预录入编号格式、申报日期 90 天窗口期、FOB 分项汇总一致性等。
-- **可观测状态机与飞书告警**：严格区分 `PASSED`（双路通过）、`NEEDS_REVIEW`（触发风控规则）、`DEGRADED`（单路降级容灾）与 `DEMO` 状态；生产态异常自动推送结构化飞书卡片告警。
+
+* **异构模型双路印证**：文本路通过 `pdfplumber` 提取结构化文本与表格交由 `Qwen2.5-32B-Instruct` 解析全量字段；视觉路通过 `PyMuPDF` 渲染高分图像交由 `Qwen3-VL-8B-Instruct` 独立提取关键核验字段，解决印章遮挡与排版错位问题。
+* **领域级合规规则引擎**：内置强业务约束校验，包括单行核算（$\text{总价} = \text{数量} \times \text{单价}$）、物理逻辑校验（$\text{毛重} > \text{净重}$）、18 位预录入编号格式、申报日期 90 天窗口期、FOB 分项汇总一致性等。
+* **可观测状态机与飞书告警**：严格区分 `PASSED`（双路通过）、`NEEDS_REVIEW`（触发风控规则）、`DEGRADED`（单路降级容灾）与 `DEMO` 状态；生产态异常自动推送结构化飞书卡片告警。
 
 ### 3. 面向生产的后端工程与并发防护
-- **异步任务“墓碑机制（Tombstone）”**：上传索引采用 `queued -> parsing -> embedding -> indexing -> indexed` 五阶段状态机；若用户在后台构建向量期间删除文件，任务会在多个检查点识别删除墓碑并主动回滚清理已写入向量，杜绝“幽灵数据”。
-- **跨进程原子文件注册表**：基于进程内锁 + 操作系统文件锁 + 临时文件原子替换（Atomic Replace）管理 `files.json`，保障高并发读写下状态不损坏。
-- **纵深安全防护**：1MB 分块流式上传校验、首 1KB `%PDF-` 魔数（Magic Bytes）强校验、目录穿越防御、进程内滑动窗口限流（Rate Limit）及 API Key 鉴权中间件。
+
+* **异步任务“墓碑机制（Tombstone）”**：上传索引采用 `queued -> parsing -> embedding -> indexing -> indexed` 五阶段状态机；若用户在后台构建向量期间删除文件，任务会在多个检查点识别删除墓碑并主动回滚清理已写入向量，杜绝“幽灵数据”。
+* **跨进程原子文件注册表**：基于进程内锁 + 操作系统文件锁 + 临时文件原子替换（Atomic Replace）管理 `files.json`，保障高并发读写下状态不损坏。
+* **纵深安全防护**：1MB 分块流式上传校验、首 1KB `%PDF-` 魔数（Magic Bytes）强校验、目录穿越防御、进程内滑动窗口限流（Rate Limit）及 API Key 鉴权中间件。
 
 ---
 
@@ -134,9 +137,11 @@ flowchart TB
 
 ### 链路一：多轮混合检索与重排流水线（Hybrid RAG Pipeline）
 
-系统在召回阶段采用稠密向量与稀疏检索的倒数秩融合算法（Reciprocal Rank Fusion），融合得分计算公式如下：
+系统在召回阶段采用稠密向量与稀疏检索的倒数秩融合算法（Reciprocal Rank Fusion），对文档切片 $d \in D$ 的融合得分计算公式如下：
 
-$$\text{RRF\_Score}(d \in D) = \sum_{m \in \{\text{Dense}, \text{BM25/ES}\}} \frac{1}{k + \text{rank}_m(d)}$$
+$$
+\mathrm{Score}_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{Dense},\, \mathrm{BM25}\}} \frac{1}{k + \mathrm{rank}_{m}(d)}
+$$
 
 ```mermaid
 sequenceDiagram
@@ -216,17 +221,18 @@ flowchart LR
 ## 🚀 快速开始
 
 ### 环境前置要求
-- **Python**: `3.11+`
-- **Node.js**: `20+`
-- **Docker**: Docker Desktop & Docker Compose v2（容器化一键部署推荐）
-- **API 密钥**: 需准备 [SiliconFlow API Key](https://siliconflow.cn/)（用于 Embedding / Rerank / Qwen 提取）与 [DeepSeek API Key](https://platform.deepseek.com/)（用于问答生成）。
+
+* **Python**: `3.11+`
+* **Node.js**: `20+`
+* **Docker**: Docker Desktop & Docker Compose v2（容器化一键部署推荐）
+* **API 密钥**: 需准备 [SiliconFlow API Key](https://siliconflow.cn/)（用于 Embedding / Rerank / Qwen 提取）与 [DeepSeek API Key](https://platform.deepseek.com/)（用于问答生成）。
 
 ### 方式一：Docker Compose 一键部署（推荐）
 
 ```bash
 # 1. 克隆仓库并进入项目根目录
-git clone <your-repo-url>
-cd chatPDF
+git clone https://github.com/Ge-Ye/enterprise-chatpdf.git
+cd enterprise-chatpdf
 
 # 2. 初始化后端环境变量
 cp chatpdf-backend/.env.example chatpdf-backend/.env
@@ -283,9 +289,10 @@ npm run dev
 ```
 
 启动完成后即可访问：
-- **前端应用工作台**：`http://localhost:3000`
-- **Swagger 交互文档**：`http://localhost:8000/docs`
-- **服务健康检查**：`http://localhost:8000/health`
+
+* **前端应用工作台**：`http://localhost:3000`
+* **Swagger 交互文档**：`http://localhost:8000/docs`
+* **服务健康检查**：`http://localhost:8000/health`
 
 ---
 
@@ -306,8 +313,8 @@ npm run dev
 
 ## 📂 项目目录结构与配置参数
 
-<details>
-<summary><b>点击展开：完整工程目录树 (Directory Structure)</b></summary>
+<details open>
+<summary><b>📁 点击展开/折叠：完整工程目录树</b></summary>
 
 ```text
 chatPDF/
@@ -352,10 +359,11 @@ chatPDF/
       ├─ components/             # React Query Provider 与报关单审查面板
       └─ lib/api.ts              # 统一 API 请求客户端
 ```
+
 </details>
 
 <details>
-<summary><b>点击展开：后端核心环境变量一览表 (Environment Variables)</b></summary>
+<summary><b>⚙️ 点击展开/折叠：核心环境变量一览表</b></summary>
 
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
